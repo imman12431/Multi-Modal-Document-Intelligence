@@ -3,6 +3,8 @@ import numpy as np
 import faiss
 import os
 
+from sentence_transformers import SentenceTransformer
+
 
 class VectorStore:
 
@@ -12,11 +14,34 @@ class VectorStore:
 
     def __init__(self, embedding_dim=384):
 
+        print("Loading embedding model...")
+
+        # default 384-dim model
+        self.embedding_model = SentenceTransformer(
+            "all-MiniLM-L6-v2"
+        )
+
         self.embedding_dim = embedding_dim
         self.index = faiss.IndexFlatL2(embedding_dim)
         self.items = []
 
-        print(f"FAISS vector store initialized ({embedding_dim} dims)")
+        print(f"✅ FAISS vector store initialized ({embedding_dim} dims)")
+
+    # --------------------------------------------------
+    # Embed query text
+    # --------------------------------------------------
+
+    def embed_text(self, text):
+
+        embedding = self.embedding_model.encode(text)
+
+        if len(embedding) != self.embedding_dim:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: "
+                f"{len(embedding)} vs {self.embedding_dim}"
+            )
+
+        return embedding
 
     # --------------------------------------------------
     # Load embedded multimodal items
@@ -32,7 +57,7 @@ class VectorStore:
         with open(embedded_items_path, "r") as f:
             self.items = json.load(f)
 
-        print(f"Loaded {len(self.items)} items")
+        print(f"✅ Loaded {len(self.items)} items")
 
     # --------------------------------------------------
     # Build FAISS index
@@ -47,10 +72,10 @@ class VectorStore:
         for i, item in enumerate(self.items):
 
             if "embedding" not in item:
+
                 print("\n🚨 Missing embedding detected!")
                 print(f"Item index: {i}")
-                print("Item contents:")
-                print(json.dumps(item, indent=2)[:1000])  # truncate long output
+                print(json.dumps(item, indent=2)[:1000])
 
                 raise RuntimeError("Embedding missing — stop build.")
 
@@ -72,15 +97,27 @@ class VectorStore:
         if self.index.ntotal == 0:
             raise RuntimeError("Index is empty")
 
+        if isinstance(query_embedding, str):
+            raise RuntimeError(
+                "Search received raw string — embed first!"
+            )
+
         distances, indices = self.index.search(
             np.array([query_embedding], dtype=np.float32),
             k
         )
 
-        matched_items = [
-            {k: v for k, v in self.items[i].items() if k != "embedding"}
-            for i in indices.flatten()
-        ]
+        matched_items = []
+
+        for i in indices.flatten():
+
+            item = {
+                key: val
+                for key, val in self.items[i].items()
+                if key != "embedding"
+            }
+
+            matched_items.append(item)
 
         return matched_items
 
@@ -107,8 +144,18 @@ if __name__ == "__main__":
 
     store = VectorStore()
 
-    # Example only — assumes embeddings JSON exists
     store.load_items("data/embedded_items.json")
     store.build_index()
+
+    test_query = "What is this document about?"
+
+    print("\nEmbedding test query...")
+
+    q_emb = store.embed_text(test_query)
+
+    results = store.search(q_emb, k=3)
+
+    print("\nSearch results:")
+    print(json.dumps(results, indent=2))
 
     print("\nVector store ready.")
