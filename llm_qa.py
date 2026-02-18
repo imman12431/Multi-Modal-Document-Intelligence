@@ -12,7 +12,7 @@ class NovaMultimodalQA:
 
         print("Initializing Amazon Nova multimodal QA...")
 
-        self.model_id = "amazon.nova-pro-v1:0"
+        self.model_id = "nvidia.nemotron-nano-12b-v2"
 
         self.client = ChatBedrock(
             model_id=self.model_id,
