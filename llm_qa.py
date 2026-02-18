@@ -1,160 +1,155 @@
-from langchain_huggingface import HuggingFacePipeline
-from langchain_community.llms import HuggingFacePipeline
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-import torch
+import json
+from langchain_aws import ChatBedrock
 
-class LLMQA:
-    def __init__(self, model_name='google/flan-t5-base'):
-        print(f"Loading LLM model via LangChain: {model_name}")
-        
-        device = 0 if torch.cuda.is_available() else -1
-        device_name = 'GPU' if device == 0 else 'CPU'
-        
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-            
-            pipe = pipeline(
-                "text2text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                max_length=512,
-                device=device,
-                temperature=0.7
-            )
-            self.llm = HuggingFacePipeline(pipeline=pipe)
-        
-            self.prompt_template = """Based on the following context, answer the question. If the answer is not in the context, say "I cannot find this information in the document."
 
-Context:
-{context}
+class NovaMultimodalQA:
 
-Question: {question}
+    # --------------------------------------------------
+    # Init Nova client
+    # --------------------------------------------------
 
-Answer:"""
-            
-            print(f"LangChain LLM loaded on {device_name}")
-            
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            raise
-    
-    def generate_answer(self, query, context_chunks):
-        context_text = "\n\n".join([
-            f"[Source: {chunk['source']}]\n{chunk['content'][:500]}"
-            for chunk in context_chunks[:3]
-        ])
-        
-        prompt = self.prompt_template.format(
-            context=context_text,
-            question=query
+    def __init__(self, region="us-east-1"):
+
+        print("Initializing Amazon Nova multimodal QA...")
+
+        self.model_id = "amazon.nova-pro-v1:0"
+
+        self.client = ChatBedrock(
+            model_id=self.model_id,
+            region_name=region
         )
-        
-        try:
-            result = self.llm.invoke(prompt)
-            answer = result.strip()
-            
-        except Exception as e:
-            print(f"Error generating answer: {e}")
-            answer = "Sorry, I encountered an error generating the answer."
-        
-        return answer
-    
-    def generate_answer_with_citations(self, query, search_results):
-        
-        context_chunks = [result['chunk'] for result in search_results]
-        
-        answer = self.generate_answer(query, context_chunks)
-       
-        citations = []
-        for i, result in enumerate(search_results[:3]):
-            chunk = result['chunk']
-            citations.append({
-                'rank': i + 1,
-                'source': chunk['source'],
-                'page': chunk['page'],
-                'type': chunk['type'],
-                'relevance_score': result['score']
-            })
-        
-        return {
-            'answer': answer,
-            'citations': citations,
-            'context_used': len(context_chunks)
+
+        print("Nova client ready.")
+
+    # --------------------------------------------------
+    # Build Nova request payload
+    # --------------------------------------------------
+
+    def _build_request(self, prompt, matched_items):
+
+        system_msg = [
+            {
+                "text": (
+                    "You are a helpful assistant for question answering.\n"
+                    "The provided text and images are retrieved context.\n"
+                    "Use them to answer accurately."
+                )
+            }
+        ]
+
+        message_content = []
+
+        for item in matched_items:
+
+            item_type = item.get("type")
+
+            if item_type in ["text", "table"]:
+
+                text = item.get("text", "").strip()
+
+                if text:
+                    message_content.append({"text": text})
+
+            else:
+
+                image_data = item.get("image")
+
+                if image_data:
+                    message_content.append({
+                        "image": {
+                            "format": "png",
+                            "source": {"bytes": image_data}
+                        }
+                    })
+
+        # user question appended last
+        message_list = [
+            {"role": "user", "content": message_content},
+            {"role": "user", "content": [{"text": prompt}]}
+        ]
+
+        inference_params = {
+            "max_new_tokens": 300,
+            "top_p": 0.9,
+            "top_k": 20
         }
 
-class SimpleQA:
-    def __init__(self):
-        print()
-    
-    def generate_answer_with_citations(self, query, search_results):
-        if not search_results:
-            return {
-                'answer': "No relevant information found in the document.",
-                'citations': [],
-                'context_used': 0
-            }
-        top_chunks = search_results[:3]
-        
-        answer_parts = []
-        for result in top_chunks:
-            chunk = result['chunk']
-            snippet = chunk['content'][:200].strip()
-            if snippet:
-                answer_parts.append(f"From {chunk['source']}: {snippet}...")
-        
-        answer = "\n\n".join(answer_parts) if answer_parts else "No relevant information found."
-        
-        citations = []
-        for i, result in enumerate(top_chunks):
-            chunk = result['chunk']
-            citations.append({
-                'rank': i + 1,
-                'source': chunk['source'],
-                'page': chunk['page'],
-                'type': chunk['type'],
-                'relevance_score': result['score']
-            })
-        
         return {
-            'answer': answer,
-            'citations': citations,
-            'context_used': len(search_results)
+            "messages": message_list,
+            "system": system_msg,
+            "inferenceConfig": inference_params
         }
+
+    # --------------------------------------------------
+    # Main QA call
+    # --------------------------------------------------
+
+    def generate_answer(self, prompt, matched_items):
+
+        if not matched_items:
+            return "No relevant context retrieved."
+
+        request_payload = self._build_request(prompt, matched_items)
+
+        try:
+
+            response = self.client.invoke(
+                json.dumps(request_payload)
+            )
+
+            return response.content
+
+        except Exception as e:
+
+            print("Nova invocation failed:", e)
+            return "Error generating answer."
+
+    # --------------------------------------------------
+    # QA with metadata output
+    # --------------------------------------------------
+
+    def generate_answer_with_context(self, prompt, matched_items):
+
+        answer = self.generate_answer(prompt, matched_items)
+
+        metadata = [
+            {
+                "type": item.get("type"),
+                "page": item.get("page"),
+                "path": item.get("path")
+            }
+            for item in matched_items[:5]
+        ]
+
+        return {
+            "answer": answer,
+            "context_items": len(matched_items),
+            "metadata": metadata
+        }
+
+
+# --------------------------------------------------
+# Standalone test
+# --------------------------------------------------
 
 if __name__ == "__main__":
 
-    test_results = [
+    # mock example retrieved items
+    test_items = [
         {
-            'chunk': {
-                'content': 'Qatar economy grew by 5% in 2024 driven by strong non-hydrocarbon sector growth.',
-                'page': 1,
-                'type': 'text',
-                'source': 'Page 1'
-            },
-            'score': 0.85
-        },
-        {
-            'chunk': {
-                'content': 'The banking sector remains healthy with strong capital ratios.',
-                'page': 2,
-                'type': 'text',
-                'source': 'Page 2'
-            },
-            'score': 0.72
+            "type": "text",
+            "page": 1,
+            "text": "Qatar economy grew strongly in 2024.",
+            "path": "sample.txt"
         }
     ]
-    try:
-        print("\n1. Test ")
-        qa = LLMQA()
-        result = qa.generate_answer_with_citations("What is Qatar's growth?", test_results)
-        print(f"\nAnswer: {result['answer']}")
-        print(f"Citations: {len(result['citations'])} sources")
-        
-    except Exception as e:
-        print(f"\nLangChain LLMQA failed: {e}")
-        print("\n2. Test Fallback ")
-        qa = SimpleQA()
-        result = qa.generate_answer_with_citations("What is Qatar's growth?", test_results)
-        print(f"\nAnswer: {result['answer']}")
-        print(f"Citations: {len(result['citations'])} sources")
+
+    qa = NovaMultimodalQA()
+
+    result = qa.generate_answer_with_context(
+        "What happened to Qatar’s economy?",
+        test_items
+    )
+
+    print("\nAnswer:\n", result["answer"])
+    print("\nContext metadata:", result["metadata"])

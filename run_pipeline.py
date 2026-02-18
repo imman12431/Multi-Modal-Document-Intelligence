@@ -2,33 +2,63 @@ import subprocess
 import sys
 import os
 
+
+# --------------------------------------------------
+# Helper: run a pipeline step
+# --------------------------------------------------
+
 def run_command(command, description):
-    result = subprocess.run(command, shell=True)
-    
+
+    print("\n" + "=" * 60)
+    print(description)
+    print("=" * 60)
+
+    result = subprocess.run(command)
+
     if result.returncode != 0:
-        print(f"\nError")
+        print("\n❌ Step failed!")
         return False
-    
-    print(f"\nCompleted")
+
+    print("\n✅ Step completed")
     return True
 
+
+# --------------------------------------------------
+# Main pipeline runner
+# --------------------------------------------------
+
 def main():
-    print()
-    print("Multi-Modal RAG Pipeline")
-    print()
+
+    print("\n🚀 Multi-Modal RAG Pipeline\n")
+
+    python_exec = sys.executable  # ensures venv python is used
+
     steps = [
-        ("python config.py", "Step 0: Creating directories"),
-        ("python process_document.py", "Step 1: Extracting document data"),
-        ("python create_embeddings.py", "Step 2: Creating embeddings"),
+
+        ([python_exec, "config.py"],
+         "STEP 0 — Create directories"),
+
+        ([python_exec, "process_document.py"],
+         "STEP 1 — Extract multimodal document data"),
+
+        ([python_exec, "create_embeddings.py"],
+         "STEP 2 — Generate Titan embeddings"),
+
+        ([python_exec, "vector_store.py"],
+         "STEP 3 — Build FAISS index"),
     ]
-    
-    # Run all steps
+
     for command, description in steps:
+
         if not run_command(command, description):
-            print("\nPipeline failed")
+
+            print("\n💥 Pipeline stopped.")
             sys.exit(1)
-    print()
-    print("PIPELINE COMPLETE")
+
+    print("\n🎉 PIPELINE COMPLETE — Ready for retrieval + QA\n")
+
+
+# --------------------------------------------------
 
 if __name__ == "__main__":
     main()

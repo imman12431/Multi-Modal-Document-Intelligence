@@ -1,97 +1,114 @@
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
-import pickle
+import json
+import numpy as np
+import faiss
+import os
+
 
 class VectorStore:
-    def __init__(self, model_name='sentence-transformers/all-MiniLM-L6-v2'):
-        print(f"Loading embedding model: {model_name}")
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=model_name,
-            model_kwargs={'device': 'cpu'},
-            encode_kwargs={'normalize_embeddings': True}
-        )
-        self.vectorstore = None
-        self.chunks = []
-        
-        print("successfully loaded")
-        
-    def create_embeddings(self, chunks):
-        self.chunks = chunks
-        documents = []
-        for i, chunk in enumerate(chunks):
-            doc = Document(
-                page_content=chunk['content'],
-                metadata={
-                    'page': chunk['page'],
-                    'type': chunk['type'],
-                    'source': chunk['source'],
-                    'chunk_id': i
-                }
-            )
-            documents.append(doc)
-        
+
+    # --------------------------------------------------
+    # Initialize store
+    # --------------------------------------------------
+
+    def __init__(self, embedding_dim=384):
+
+        self.embedding_dim = embedding_dim
+        self.index = faiss.IndexFlatL2(embedding_dim)
+        self.items = []
+
+        print(f"FAISS vector store initialized ({embedding_dim} dims)")
+
+    # --------------------------------------------------
+    # Load embedded multimodal items
+    # --------------------------------------------------
+
+    def load_items(self, embedded_items_path):
+
+        if not os.path.exists(embedded_items_path):
+            raise FileNotFoundError("Embedded items JSON not found")
+
+        print("Loading embedded items...")
+
+        with open(embedded_items_path, "r") as f:
+            self.items = json.load(f)
+
+        print(f"Loaded {len(self.items)} items")
+
+    # --------------------------------------------------
+    # Build FAISS index
+    # --------------------------------------------------
+
+    def build_index(self):
+
         print("Building FAISS index...")
-        self.vectorstore = FAISS.from_documents(
-            documents=documents,
-            embedding=self.embeddings
+
+        embeddings = []
+
+        for i, item in enumerate(self.items):
+
+            if "embedding" not in item:
+                print("\n🚨 Missing embedding detected!")
+                print(f"Item index: {i}")
+                print("Item contents:")
+                print(json.dumps(item, indent=2)[:1000])  # truncate long output
+
+                raise RuntimeError("Embedding missing — stop build.")
+
+            embeddings.append(item["embedding"])
+
+        embeddings = np.array(embeddings, dtype=np.float32)
+
+        self.index.reset()
+        self.index.add(embeddings)
+
+        print(f"✅ Index contains {self.index.ntotal} vectors")
+
+    # --------------------------------------------------
+    # Search
+    # --------------------------------------------------
+
+    def search(self, query_embedding, k=5):
+
+        if self.index.ntotal == 0:
+            raise RuntimeError("Index is empty")
+
+        distances, indices = self.index.search(
+            np.array([query_embedding], dtype=np.float32),
+            k
         )
-        
-        print(f"FAISS index with {len(documents)} vectors")
-        
-    def search(self, query, k=5):
-        if self.vectorstore is None:
-            print("Vectorstore not created")
-            return []
-        results = self.vectorstore.similarity_search_with_score(query, k=k)
-        
-        formatted_results = []
-        for i, (doc, score) in enumerate(results):
-            formatted_results.append({
-                'chunk': {
-                    'content': doc.page_content,
-                    'page': doc.metadata['page'],
-                    'type': doc.metadata['type'],
-                    'source': doc.metadata['source']
-                },
-                'score': float(score),
-                'rank': i + 1
-            })
-        
-        return formatted_results
-    
-    def save(self, filepath='vector_store'):
-        if self.vectorstore is None:
-            print("No vectorstore to save")
-            return
-        self.vectorstore.save_local(filepath)
-    
-        with open(f"{filepath}_chunks.pkl", 'wb') as f:
-            pickle.dump(self.chunks, f)
-    
-    def load(self, filepath='vector_store'):
-        self.vectorstore = FAISS.load_local(
-            filepath,
-            self.embeddings,
-            allow_dangerous_deserialization=True
-        )
-        with open(f"{filepath}_chunks.pkl", 'rb') as f:
-            self.chunks = pickle.load(f)
-        
-        print(f"Loaded vector store chunks")
+
+        matched_items = [
+            {k: v for k, v in self.items[i].items() if k != "embedding"}
+            for i in indices.flatten()
+        ]
+
+        return matched_items
+
+    # --------------------------------------------------
+    # Save / load index
+    # --------------------------------------------------
+
+    def save(self, path="faiss_index"):
+
+        faiss.write_index(self.index, path)
+        print(f"FAISS index saved → {path}")
+
+    def load(self, path="faiss_index"):
+
+        self.index = faiss.read_index(path)
+        print("FAISS index loaded")
+
+
+# --------------------------------------------------
+# Test run
+# --------------------------------------------------
 
 if __name__ == "__main__":
-    test_chunks = [
-        {'content': 'Qatar has strong economic growth', 'page': 1, 'type': 'text', 'source': 'Page 1'},
-        {'content': 'Banking sector remains healthy', 'page': 2, 'type': 'text', 'source': 'Page 2'},
-        {'content': 'IMF recommendations for fiscal policy', 'page': 3, 'type': 'text', 'source': 'Page 3'}
-    ]
-    
-    print("Testing LangChain Vector Store...")
+
     store = VectorStore()
-    store.create_embeddings(test_chunks)
-    
-    results = store.search("What is Qatar's economic situation?", k=2)
-    print(f"\nSearch Results:")
-    for result in results:
-        print(f"Rank {result['rank']}: {result['chunk']['content'][:50]}... (Score: {result['score']:.3f})")
+
+    # Example only — assumes embeddings JSON exists
+    store.load_items("data/embedded_items.json")
+    store.build_index()
+
+    print("\nVector store ready.")

@@ -1,142 +1,173 @@
 import streamlit as st
 import os
+
 from vector_store import VectorStore
-from llm_qa import LLMQA, SimpleQA
+from llm_qa import NovaMultimodalQA
+from create_embeddings import generate_multimodal_embeddings
 import config
 
+
+# --------------------------------------------------
+# Streamlit setup
+# --------------------------------------------------
+
 st.set_page_config(
-    page_title="RAG multi-model"
+    page_title="Multi-Modal RAG",
+    layout="wide"
 )
 
-if 'vector_store' not in st.session_state:
+st.title("📄 Multi-Modal RAG — Qatar IMF Report")
+
+
+# --------------------------------------------------
+# Session state
+# --------------------------------------------------
+
+if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
-if 'qa_system' not in st.session_state:
+
+if "qa_system" not in st.session_state:
     st.session_state.qa_system = None
-if 'loaded' not in st.session_state:
+
+if "loaded" not in st.session_state:
     st.session_state.loaded = False
-if 'chat_history' not in st.session_state:
+
+if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
+
+# --------------------------------------------------
+# Load vector store + Nova QA
+# --------------------------------------------------
+
 if not st.session_state.loaded:
-    faiss_file = os.path.join(config.VECTOR_STORE_PATH, "index.faiss")
-    if os.path.exists(faiss_file) or os.path.exists(f"{config.VECTOR_STORE_PATH}.faiss"):
-        with st.spinner("Loading pre-processed data..."):
+
+    index_path = "faiss_index"
+
+    if os.path.exists(index_path):
+
+        with st.spinner("Loading vector store + Nova QA..."):
+
             try:
-                vector_store = VectorStore(model_name=config.EMBEDDING_MODEL)
-                vector_store.load(config.VECTOR_STORE_PATH)
-                st.session_state.vector_store = vector_store
-                
-                try:
-                    qa_system = LLMQA(model_name=config.LLM_MODEL)
-                    st.session_state.qa_system = qa_system
-                except:
-                    st.warning("Using simple QA (LLM model failed to load)")
-                    st.session_state.qa_system = SimpleQA()
-                
+                store = VectorStore()
+                store.load_items(config.EMBEDDED_ITEMS_PATH)
+                store.load(index_path)
+
+                qa = NovaMultimodalQA()
+
+                st.session_state.vector_store = store
+                st.session_state.qa_system = qa
                 st.session_state.loaded = True
-                
+
             except Exception as e:
-                st.error(f"Error loading data: {e}")
+                st.error(f"Loading failed: {e}")
                 st.session_state.loaded = False
 
-st.title(" Multi-Modal RAG ")
-st.markdown("Ask questions about the Qatar IMF Report")
+
+# --------------------------------------------------
+# Sidebar
+# --------------------------------------------------
 
 with st.sidebar:
-    st.header("file Status")
-    
-    if st.session_state.loaded:
-        st.success(" Ready to use ")
 
-        if st.session_state.vector_store:
-            total = len(st.session_state.vector_store.chunks)
-            text_count = sum(1 for c in st.session_state.vector_store.chunks if c['type'] == 'text')
-            table_count = sum(1 for c in st.session_state.vector_store.chunks if c['type'] == 'table')
-            image_count = sum(1 for c in st.session_state.vector_store.chunks if c['type'] == 'image')
-        
-        
+    st.header("System Status")
+
+    if st.session_state.loaded:
+
+        st.success("Pipeline Ready")
+
+        total = len(st.session_state.vector_store.items)
+
+        st.write(f"Embedded items: {total}")
+
         st.markdown("---")
+
         if st.button("Clear Chat History"):
             st.session_state.chat_history = []
             st.rerun()
-    
-    else:
-        st.error(" Data Not Found!")
-        st.markdown("---")
-        st.subheader(" Setup Required")
-        st.markdown("""
-        Please run the following commands:
-        
-        **Step 1: Process Document**
-        ```bash
-        python process_document.py
-        ```
-        
-        **Step 2: Create Embeddings**
-        ```bash
-        python create_embeddings.py
-        ```
-        
-        **Step 3: Restart App**
-        ```bash
-        streamlit run app.py
-        ```
-        """)
-        
 
-# Main chat interface
+    else:
+
+        st.error("Pipeline not initialized")
+
+# --------------------------------------------------
+# Chat UI
+# --------------------------------------------------
+
 if st.session_state.loaded:
+
     st.markdown("---")
- 
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if "citations" in message:
-                with st.expander("📎 View Citations"):
-                    for cite in message["citations"]:
+
+    # Display history
+    for msg in st.session_state.chat_history:
+
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+            if "metadata" in msg:
+
+                with st.expander("Retrieved Context"):
+                    for meta in msg["metadata"]:
                         st.markdown(
-                            f"**{cite['source']}** | "
-                            f"Type: {cite['type']} | "
-                            f"Relevance: {cite['relevance_score']:.3f}"
+                            f"Type: {meta['type']} | Page: {meta['page']}"
                         )
 
-    query = st.chat_input("Ask a question about the document...")
-    
+    # User input
+    query = st.chat_input("Ask about the document…")
+
     if query:
-        st.session_state.chat_history.append({"role": "user", "content": query})
-        
+
+        st.session_state.chat_history.append(
+            {"role": "user", "content": query}
+        )
+
         with st.chat_message("user"):
             st.markdown(query)
-        
+
         with st.chat_message("assistant"):
-            with st.spinner("Searching and generating answer..."):
-                search_results = st.session_state.vector_store.search(query, k=5)
-                
-                result = st.session_state.qa_system.generate_answer_with_citations(
-                    query, search_results
+
+            with st.spinner("Embedding → Searching → Nova reasoning..."):
+
+                # ----------------------------------
+                # Embed query
+                # ----------------------------------
+
+                query_embedding = generate_multimodal_embeddings(
+                    prompt=query
                 )
-                
-                st.markdown(result['answer'])
-                
-                with st.expander("View Citations"):
-                    for cite in result['citations']:
+
+                # ----------------------------------
+                # Search FAISS
+                # ----------------------------------
+
+                matched_items = st.session_state.vector_store.search(
+                    query_embedding,
+                    k=5
+                )
+
+                # ----------------------------------
+                # Nova QA
+                # ----------------------------------
+
+                result = st.session_state.qa_system.generate_answer_with_context(
+                    query,
+                    matched_items
+                )
+
+                st.markdown(result["answer"])
+
+                with st.expander("Retrieved Context"):
+                    for meta in result["metadata"]:
                         st.markdown(
-                            f"**{cite['source']}** | "
-                            f"Type: {cite['type']} | "
-                            f"Relevance: {cite['relevance_score']:.3f}"
+                            f"Type: {meta['type']} | Page: {meta['page']}"
                         )
-                
+
                 st.session_state.chat_history.append({
                     "role": "assistant",
-                    "content": result['answer'],
-                    "citations": result['citations']
+                    "content": result["answer"],
+                    "metadata": result["metadata"]
                 })
 
 else:
-    st.info(" Follow steps")
-    
-    st.markdown("""
-    Step 1: python process_document.py
-    ### Step 2:python create_embeddings.py
-    ### Step 3:streamlit run app.py
-    """)
+
+    st.info("Pipeline not ready — run preprocessing scripts first.")
