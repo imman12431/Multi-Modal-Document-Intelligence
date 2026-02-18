@@ -99,10 +99,18 @@ class NovaMultimodalQA:
 
             return response.content
 
+
         except Exception as e:
 
-            print("Nova invocation failed:", e)
-            return "Error generating answer."
+            import traceback
+
+            print("\n🚨 NOVA ERROR")
+
+            print("Exception:", e)
+
+            traceback.print_exc()
+
+            return f"Nova error: {str(e)}"
 
     # --------------------------------------------------
     # QA with metadata output

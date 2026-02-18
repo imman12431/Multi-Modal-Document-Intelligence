@@ -152,10 +152,16 @@ if st.session_state.loaded:
                     st.json(results)
 
                     # Nova QA
-                    answer = st.session_state.qa_system.generate_answer(
-                        query,
-                        results
-                    )
+                    try:
+                        answer = st.session_state.qa_system.generate_answer(
+                            query,
+                            results
+                        )
+
+                    except Exception as e:
+                        st.error(f"QA failure: {e}")
+                        st.code(traceback.format_exc())
+                        raise
 
                     st.markdown(answer)
 
