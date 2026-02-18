@@ -13,7 +13,7 @@ import config
 
 st.set_page_config(page_title="Multimodal RAG Debug")
 
-st.title("📄 Multimodal RAG — Debug Mode")
+st.title("📄 Multimodal RAG — Deep Debug Mode")
 
 
 # -----------------------------------------------------
@@ -34,66 +34,75 @@ if "chat_history" not in st.session_state:
 
 
 # -----------------------------------------------------
-# DEBUG PANEL — sidebar
+# DEBUG SIDEBAR — FILE CHECKS
 # -----------------------------------------------------
 
 with st.sidebar:
 
     st.header("🔍 Debug Panel")
 
-    st.write("### Expected files:")
-
     debug_paths = {
         "PDF": config.PDF_PATH,
         "Extracted JSON": config.CHUNKS_PATH,
         "Embedded JSON": config.EMBEDDED_ITEMS_PATH,
-        "FAISS index": "faiss_index",
+        "FAISS index (if saved)": "faiss_index",
     }
 
     for label, path in debug_paths.items():
+
         exists = os.path.exists(path)
-        st.write(f"{label}:")
+
+        st.write(f"### {label}")
         st.code(path)
         st.write("✅ Exists" if exists else "❌ Missing")
         st.markdown("---")
 
 
 # -----------------------------------------------------
-# Pipeline loader with debug logging
+# PIPELINE LOADER
 # -----------------------------------------------------
 
 if not st.session_state.loaded:
 
-    st.info("🔄 Attempting to initialize pipeline...")
+    st.info("🔄 Initializing pipeline...")
 
     try:
 
-        # ---- Check embedded file exists ----
+        # ---------- Embedded file check ----------
+
         if not os.path.exists(config.EMBEDDED_ITEMS_PATH):
-            st.error("❌ Embedded items JSON not found.")
+            st.error("❌ Embedded items file missing")
             st.stop()
 
-        st.write("✅ Embedded items found")
+        st.success("Embedded items found")
 
-        # ---- Load vector store ----
+        # ---------- Vector store ----------
+
         st.write("Loading vector store...")
 
         vector_store = VectorStore()
+
+        st.write("→ Loading embedded items JSON")
         vector_store.load_items(config.EMBEDDED_ITEMS_PATH)
+
+        st.write(f"Loaded items: {len(vector_store.items)}")
+
+        st.write("→ Building FAISS index")
         vector_store.build_index()
+
+        st.success("Vector store ready")
 
         st.session_state.vector_store = vector_store
 
-        st.write("✅ Vector store ready")
+        # ---------- Nova QA ----------
 
-        # ---- Load Nova QA ----
         st.write("Initializing Nova QA...")
 
         qa = NovaMultimodalQA()
 
         st.session_state.qa_system = qa
 
-        st.write("✅ QA system ready")
+        st.success("Nova QA ready")
 
         st.session_state.loaded = True
 
@@ -104,14 +113,13 @@ if not st.session_state.loaded:
         st.error("🚨 Pipeline initialization failed")
 
         st.text(str(e))
-
         st.code(traceback.format_exc())
 
         st.session_state.loaded = False
 
 
 # -----------------------------------------------------
-# Main app interface
+# MAIN CHAT INTERFACE
 # -----------------------------------------------------
 
 if st.session_state.loaded:
@@ -119,14 +127,16 @@ if st.session_state.loaded:
     st.markdown("---")
     st.success("✅ Pipeline ready")
 
-    # ---- Chat history ----
+    # ---------- Chat history ----------
+
     for msg in st.session_state.chat_history:
 
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
 
-    # ---- User input ----
+    # ---------- User input ----------
+
     query = st.chat_input("Ask a question about the document...")
 
     if query:
@@ -142,26 +152,68 @@ if st.session_state.loaded:
 
                 try:
 
-                    # FAISS search
-                    results = st.session_state.vector_store.search(
-                        st.session_state.vector_store.items[0]["embedding"],
-                        k=5
+                    # =================================================
+                    # DEBUG STEP 1 — USER QUERY
+                    # =================================================
+
+                    st.write("=== DEBUG STEP 1 — QUERY ===")
+                    st.code(query)
+
+                    # =================================================
+                    # DEBUG STEP 2 — VECTOR SEARCH
+                    # =================================================
+
+                    st.write("=== DEBUG STEP 2 — VECTOR SEARCH ===")
+
+                    search_results = st.session_state.vector_store.search(query, k=5)
+
+                    st.write("Results type:")
+                    st.code(type(search_results))
+
+                    st.write("Result count:")
+                    st.code(len(search_results))
+
+                    st.write("Raw search results:")
+                    st.json(search_results)
+
+                    if not search_results:
+                        st.error("❌ No search results returned")
+                        st.stop()
+
+                    # =================================================
+                    # DEBUG STEP 3 — FORMAT FOR NOVA
+                    # =================================================
+
+                    st.write("=== DEBUG STEP 3 — MATCHED ITEMS ===")
+
+                    matched_items = []
+
+                    for i, r in enumerate(search_results):
+
+                        st.write(f"Processing result #{i}")
+
+                        item = r.get("chunk", r)
+
+                        st.json(item)
+
+                        matched_items.append(item)
+
+                    st.write("Final matched items:")
+                    st.json(matched_items)
+
+                    # =================================================
+                    # DEBUG STEP 4 — NOVA CALL
+                    # =================================================
+
+                    st.write("=== DEBUG STEP 4 — NOVA INVOCATION ===")
+
+                    answer = st.session_state.qa_system.generate_answer(
+                        query,
+                        matched_items
                     )
 
-                    st.write("Debug — retrieved items:")
-                    st.json(results)
-
-                    # Nova QA
-                    try:
-                        answer = st.session_state.qa_system.generate_answer(
-                            query,
-                            results
-                        )
-
-                    except Exception as e:
-                        st.error(f"QA failure: {e}")
-                        st.code(traceback.format_exc())
-                        raise
+                    st.write("Nova response:")
+                    st.code(answer)
 
                     st.markdown(answer)
 
@@ -172,8 +224,9 @@ if st.session_state.loaded:
 
                 except Exception as e:
 
-                    st.error("❌ Runtime error")
+                    st.error("❌ Runtime failure")
 
+                    st.text(str(e))
                     st.code(traceback.format_exc())
 
 
