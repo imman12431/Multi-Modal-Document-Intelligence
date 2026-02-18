@@ -1,27 +1,24 @@
 import streamlit as st
 import os
+import traceback
 
 from vector_store import VectorStore
 from llm_qa import NovaMultimodalQA
-from create_embeddings import generate_multimodal_embeddings
 import config
 
 
-# --------------------------------------------------
+# -----------------------------------------------------
 # Streamlit setup
-# --------------------------------------------------
+# -----------------------------------------------------
 
-st.set_page_config(
-    page_title="Multi-Modal RAG",
-    layout="wide"
-)
+st.set_page_config(page_title="Multimodal RAG Debug")
 
-st.title("📄 Multi-Modal RAG — Qatar IMF Report")
+st.title("📄 Multimodal RAG — Debug Mode")
 
 
-# --------------------------------------------------
-# Session state
-# --------------------------------------------------
+# -----------------------------------------------------
+# Session state init
+# -----------------------------------------------------
 
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
@@ -36,138 +33,145 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 
-# --------------------------------------------------
-# Load vector store + Nova QA
-# --------------------------------------------------
-
-if not st.session_state.loaded:
-
-    index_path = "faiss_index"
-
-    if os.path.exists(index_path):
-
-        with st.spinner("Loading vector store + Nova QA..."):
-
-            try:
-                store = VectorStore()
-                store.load_items(config.EMBEDDED_ITEMS_PATH)
-                store.load(index_path)
-
-                qa = NovaMultimodalQA()
-
-                st.session_state.vector_store = store
-                st.session_state.qa_system = qa
-                st.session_state.loaded = True
-
-            except Exception as e:
-                st.error(f"Loading failed: {e}")
-                st.session_state.loaded = False
-
-
-# --------------------------------------------------
-# Sidebar
-# --------------------------------------------------
+# -----------------------------------------------------
+# DEBUG PANEL — sidebar
+# -----------------------------------------------------
 
 with st.sidebar:
 
-    st.header("System Status")
+    st.header("🔍 Debug Panel")
 
-    if st.session_state.loaded:
+    st.write("### Expected files:")
 
-        st.success("Pipeline Ready")
+    debug_paths = {
+        "PDF": config.PDF_PATH,
+        "Extracted JSON": config.CHUNKS_PATH,
+        "Embedded JSON": config.EMBEDDED_ITEMS_PATH,
+        "FAISS index": "faiss_index",
+    }
 
-        total = len(st.session_state.vector_store.items)
-
-        st.write(f"Embedded items: {total}")
-
+    for label, path in debug_paths.items():
+        exists = os.path.exists(path)
+        st.write(f"{label}:")
+        st.code(path)
+        st.write("✅ Exists" if exists else "❌ Missing")
         st.markdown("---")
 
-        if st.button("Clear Chat History"):
-            st.session_state.chat_history = []
-            st.rerun()
 
-    else:
+# -----------------------------------------------------
+# Pipeline loader with debug logging
+# -----------------------------------------------------
 
-        st.error("Pipeline not initialized")
+if not st.session_state.loaded:
 
-# --------------------------------------------------
-# Chat UI
-# --------------------------------------------------
+    st.info("🔄 Attempting to initialize pipeline...")
+
+    try:
+
+        # ---- Check embedded file exists ----
+        if not os.path.exists(config.EMBEDDED_ITEMS_PATH):
+            st.error("❌ Embedded items JSON not found.")
+            st.stop()
+
+        st.write("✅ Embedded items found")
+
+        # ---- Load vector store ----
+        st.write("Loading vector store...")
+
+        vector_store = VectorStore()
+        vector_store.load_items(config.EMBEDDED_ITEMS_PATH)
+        vector_store.build_index()
+
+        st.session_state.vector_store = vector_store
+
+        st.write("✅ Vector store ready")
+
+        # ---- Load Nova QA ----
+        st.write("Initializing Nova QA...")
+
+        qa = NovaMultimodalQA()
+
+        st.session_state.qa_system = qa
+
+        st.write("✅ QA system ready")
+
+        st.session_state.loaded = True
+
+        st.success("🎉 Pipeline initialized successfully!")
+
+    except Exception as e:
+
+        st.error("🚨 Pipeline initialization failed")
+
+        st.text(str(e))
+
+        st.code(traceback.format_exc())
+
+        st.session_state.loaded = False
+
+
+# -----------------------------------------------------
+# Main app interface
+# -----------------------------------------------------
 
 if st.session_state.loaded:
 
     st.markdown("---")
+    st.success("✅ Pipeline ready")
 
-    # Display history
+    # ---- Chat history ----
     for msg in st.session_state.chat_history:
 
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-            if "metadata" in msg:
 
-                with st.expander("Retrieved Context"):
-                    for meta in msg["metadata"]:
-                        st.markdown(
-                            f"Type: {meta['type']} | Page: {meta['page']}"
-                        )
-
-    # User input
-    query = st.chat_input("Ask about the document…")
+    # ---- User input ----
+    query = st.chat_input("Ask a question about the document...")
 
     if query:
 
-        st.session_state.chat_history.append(
-            {"role": "user", "content": query}
-        )
-
-        with st.chat_message("user"):
-            st.markdown(query)
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": query
+        })
 
         with st.chat_message("assistant"):
 
-            with st.spinner("Embedding → Searching → Nova reasoning..."):
+            with st.spinner("🔍 Searching + generating answer..."):
 
-                # ----------------------------------
-                # Embed query
-                # ----------------------------------
+                try:
 
-                query_embedding = generate_multimodal_embeddings(
-                    prompt=query
-                )
+                    # FAISS search
+                    results = st.session_state.vector_store.search(
+                        st.session_state.vector_store.items[0]["embedding"],
+                        k=5
+                    )
 
-                # ----------------------------------
-                # Search FAISS
-                # ----------------------------------
+                    st.write("Debug — retrieved items:")
+                    st.json(results)
 
-                matched_items = st.session_state.vector_store.search(
-                    query_embedding,
-                    k=5
-                )
+                    # Nova QA
+                    answer = st.session_state.qa_system.generate_answer(
+                        query,
+                        results
+                    )
 
-                # ----------------------------------
-                # Nova QA
-                # ----------------------------------
+                    st.markdown(answer)
 
-                result = st.session_state.qa_system.generate_answer_with_context(
-                    query,
-                    matched_items
-                )
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": answer
+                    })
 
-                st.markdown(result["answer"])
+                except Exception as e:
 
-                with st.expander("Retrieved Context"):
-                    for meta in result["metadata"]:
-                        st.markdown(
-                            f"Type: {meta['type']} | Page: {meta['page']}"
-                        )
+                    st.error("❌ Runtime error")
 
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": result["answer"],
-                    "metadata": result["metadata"]
-                })
+                    st.code(traceback.format_exc())
+
 
 else:
 
-    st.info("Pipeline not ready — run preprocessing scripts first.")
+    st.error("🚨 Pipeline not initialized")
+
