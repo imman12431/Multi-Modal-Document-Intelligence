@@ -1,43 +1,50 @@
-import json
+import os
+import traceback
 from langchain_aws import ChatBedrock
 
 
 class NovaMultimodalQA:
 
     # --------------------------------------------------
-    # Init Nova client
+    # Initialize Nova client
     # --------------------------------------------------
 
-    def __init__(self, region="us-east-1"):
+    def __init__(self):
 
-        print("Initializing Amazon Nova multimodal QA...")
+        print("\n=== NOVA INIT DEBUG ===")
 
         self.model_id = "amazon.nova-pro-v1:0"
 
-        self.client = ChatBedrock(
-            model_id=self.model_id,
-            region_name=region
-        )
+        region = os.getenv("AWS_REGION", "us-east-1")
 
-        print("Nova client ready.")
+        print("Model:", self.model_id)
+        print("Region:", region)
+        print("AWS key present:",
+              bool(os.getenv("AWS_ACCESS_KEY_ID")))
+        print("=======================\n")
+
+        try:
+
+            self.client = ChatBedrock(
+                model_id=self.model_id,
+                region_name=region
+            )
+
+            print("✅ Nova client initialized")
+
+        except Exception as e:
+
+            print("❌ Nova init failure")
+            traceback.print_exc()
+            raise e
 
     # --------------------------------------------------
-    # Build Nova request payload
+    # Build chat prompt
     # --------------------------------------------------
 
-    def _build_request(self, prompt, matched_items):
+    def _build_messages(self, prompt, matched_items):
 
-        system_msg = [
-            {
-                "text": (
-                    "You are a helpful assistant for question answering.\n"
-                    "The provided text and images are retrieved context.\n"
-                    "Use them to answer accurately."
-                )
-            }
-        ]
-
-        message_content = []
+        context_text = ""
 
         for item in matched_items:
 
@@ -48,37 +55,24 @@ class NovaMultimodalQA:
                 text = item.get("text", "").strip()
 
                 if text:
-                    message_content.append({"text": text})
+                    context_text += text + "\n\n"
 
-            else:
+        system_prompt = (
+            "You are a helpful assistant answering questions using retrieved context.\n"
+            "Use only the provided information when possible.\n\n"
+            f"Context:\n{context_text}"
+        )
 
-                image_data = item.get("image")
-
-                if image_data:
-                    message_content.append({
-                        "image": {
-                            "format": "png",
-                            "source": {"bytes": image_data}
-                        }
-                    })
-
-        # user question appended last
-        message_list = [
-            {"role": "user", "content": message_content},
-            {"role": "user", "content": [{"text": prompt}]}
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
         ]
 
-        inference_params = {
-            "max_new_tokens": 300,
-            "top_p": 0.9,
-            "top_k": 20
-        }
+        print("\n=== DEBUG — BUILT PROMPT ===")
+        print(system_prompt[:1000])
+        print("============================\n")
 
-        return {
-            "messages": message_list,
-            "system": system_msg,
-            "inferenceConfig": inference_params
-        }
+        return messages
 
     # --------------------------------------------------
     # Main QA call
@@ -89,25 +83,21 @@ class NovaMultimodalQA:
         if not matched_items:
             return "No relevant context retrieved."
 
-        request_payload = self._build_request(prompt, matched_items)
+        messages = self._build_messages(prompt, matched_items)
 
         try:
 
-            response = self.client.invoke(
-                json.dumps(request_payload)
-            )
+            print("Calling Nova model...")
+
+            response = self.client.invoke(messages)
+
+            print("Nova response received")
 
             return response.content
 
-
         except Exception as e:
 
-            import traceback
-
-            print("\n🚨 NOVA ERROR")
-
-            print("Exception:", e)
-
+            print("\n🚨 NOVA CALL ERROR")
             traceback.print_exc()
 
             return f"Nova error: {str(e)}"
@@ -142,7 +132,8 @@ class NovaMultimodalQA:
 
 if __name__ == "__main__":
 
-    # mock example retrieved items
+    print("\n=== Standalone Nova QA test ===")
+
     test_items = [
         {
             "type": "text",
@@ -160,4 +151,4 @@ if __name__ == "__main__":
     )
 
     print("\nAnswer:\n", result["answer"])
-    print("\nContext metadata:", result["metadata"])
+    print("\nMetadata:", result["metadata"])
