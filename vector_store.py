@@ -2,8 +2,8 @@ import json
 import numpy as np
 import faiss
 import os
-
-from sentence_transformers import SentenceTransformer
+import boto3
+from botocore.exceptions import ClientError
 
 
 class VectorStore:
@@ -12,36 +12,61 @@ class VectorStore:
     # Initialize store
     # --------------------------------------------------
 
-    def __init__(self, embedding_dim=384):
+    def __init__(self, embedding_dim=384, region="us-east-1"):
 
-        print("Loading embedding model...")
-
-        # default 384-dim model
-        self.embedding_model = SentenceTransformer(
-            "all-MiniLM-L6-v2"
-        )
+        print("Initializing Titan embedding client...")
 
         self.embedding_dim = embedding_dim
+        self.model_id = "amazon.titan-embed-image-v1"
+
+        self.bedrock_client = boto3.client(
+            service_name="bedrock-runtime",
+            region_name=region
+        )
+
         self.index = faiss.IndexFlatL2(embedding_dim)
         self.items = []
 
         print(f"✅ FAISS vector store initialized ({embedding_dim} dims)")
 
     # --------------------------------------------------
-    # Embed query text
+    # Embed query text via Titan (same model used at index time)
     # --------------------------------------------------
 
     def embed_text(self, text):
 
-        embedding = self.embedding_model.encode(text)
+        body = {
+            "inputText": text,
+            "embeddingConfig": {
+                "outputEmbeddingLength": self.embedding_dim
+            }
+        }
 
-        if len(embedding) != self.embedding_dim:
-            raise RuntimeError(
-                f"Embedding dimension mismatch: "
-                f"{len(embedding)} vs {self.embedding_dim}"
+        try:
+
+            response = self.bedrock_client.invoke_model(
+                modelId=self.model_id,
+                body=json.dumps(body),
+                accept="application/json",
+                contentType="application/json"
             )
 
-        return embedding
+            result = json.loads(response["body"].read())
+            embedding = result.get("embedding")
+
+            if not embedding:
+                raise RuntimeError("Titan returned empty embedding")
+
+            if len(embedding) != self.embedding_dim:
+                raise RuntimeError(
+                    f"Embedding dimension mismatch: "
+                    f"{len(embedding)} vs {self.embedding_dim}"
+                )
+
+            return np.array(embedding, dtype=np.float32)
+
+        except ClientError as e:
+            raise RuntimeError(f"Bedrock call failed: {e}")
 
     # --------------------------------------------------
     # Load embedded multimodal items
@@ -102,6 +127,9 @@ class VectorStore:
                 "Search received raw string — embed first!"
             )
 
+        # Cap k to number of indexed vectors to avoid -1 indices
+        k = min(k, self.index.ntotal)
+
         distances, indices = self.index.search(
             np.array([query_embedding], dtype=np.float32),
             k
@@ -110,6 +138,10 @@ class VectorStore:
         matched_items = []
 
         for i in indices.flatten():
+
+            # Guard against FAISS returning -1 for unfilled slots
+            if i == -1 or i >= len(self.items):
+                continue
 
             item = {
                 key: val
@@ -149,9 +181,11 @@ if __name__ == "__main__":
 
     test_query = "What is this document about?"
 
-    print("\nEmbedding test query...")
+    print("\nEmbedding test query via Titan...")
 
     q_emb = store.embed_text(test_query)
+
+    print(f"Query embedding shape: {q_emb.shape}")
 
     results = store.search(q_emb, k=3)
 
