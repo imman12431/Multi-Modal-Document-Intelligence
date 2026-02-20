@@ -151,6 +151,7 @@ if st.session_state.loaded:
 
                 search_results = st.session_state.vector_store.search(
                     query_embedding,
+                    query_text=query,
                     k=5
                 )
 
