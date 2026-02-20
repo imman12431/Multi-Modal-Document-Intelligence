@@ -119,11 +119,11 @@ st.title("📄 Multimodal Document QA")
 
 st.markdown(
     """
-    ## Multimodal RAG Pipeline — Project Summary
+## Multimodal RAG Pipeline — Project Summary
 
 This project is an end-to-end RAG system that answers natural language questions about a PDF by understanding its text, tables, and images together. The pipeline runs offline to process and index the document, and a Streamlit app serves as the live query interface.
 
-    ## Key Features
+## Key Features
 
 - **Multimodal extraction** — extracts text, tables, and images from the PDF including charts and image-based tables rendered as vector drawings, which standard extractors miss entirely
 - **Layout-aware clustering** — separates adjacent visual elements on the same page using bounding-box gap checks, text separator vetoes, and size caps so side-by-side charts are never merged into one
