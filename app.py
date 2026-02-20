@@ -150,6 +150,7 @@ with col2:
         caption="Example of figure data in the PDF",
         width=300
     )
+
 st.divider()
 
 
@@ -162,19 +163,27 @@ SAMPLE_QUESTIONS = [
     "Who had the largest share of bank domestic credit in October 2024",
 ]
 
-if not st.session_state.chat_history:
+st.markdown("**Try a sample question:**")
 
-    st.markdown("**Try a sample question:**")
+cols = st.columns(len(SAMPLE_QUESTIONS))
 
-    cols = st.columns(len(SAMPLE_QUESTIONS))
+for col, question in zip(cols, SAMPLE_QUESTIONS):
+    with col:
+        if st.button(question, use_container_width=True):
+            st.session_state.sample_query = question
 
-    for col, question in zip(cols, SAMPLE_QUESTIONS):
-        with col:
-            if st.button(question, use_container_width=True):
-                st.session_state.sample_query = question
-                st.rerun()
+st.divider()
 
-    st.divider()
+
+# -----------------------------------------------------
+# Resolve query — either from sample button or chat input
+# -----------------------------------------------------
+
+query = st.chat_input("Ask a question about the document...")
+
+if st.session_state.sample_query:
+    query = st.session_state.sample_query
+    st.session_state.sample_query = None
 
 
 # -----------------------------------------------------
@@ -187,16 +196,6 @@ for msg in st.session_state.chat_history:
         if msg.get("context_items"):
             render_context_items(msg["context_items"])
 
-
-# -----------------------------------------------------
-# Resolve query — either from sample button or chat input
-# -----------------------------------------------------
-
-query = st.chat_input("Ask a question about the document...")
-
-if st.session_state.sample_query:
-    query = st.session_state.sample_query
-    st.session_state.sample_query = None
 
 if query:
 
