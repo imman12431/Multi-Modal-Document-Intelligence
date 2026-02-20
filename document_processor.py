@@ -313,27 +313,31 @@ class DocumentProcessor:
         """
         Detects image-like regions painted with PDF drawing operators —
         these are invisible to get_images() but show up in the page's
-        drawing commands. Crops and saves each region.
+        drawing commands. Crops and saves each region separately.
 
-        This is the key fix for tables/charts rendered as vector graphics
-        or rasterized into the page stream rather than stored as XObjects.
+        Uses text blocks as hard separators so two charts or tables
+        sitting next to each other are never merged into one crop.
         """
 
-        # get_drawings() returns all filled/stroked paths on the page
         drawings = page.get_drawings()
 
         if not drawings:
             return
 
-        # Cluster drawing rects into contiguous regions.
-        # A "region" is a group of drawings whose bounding boxes are close
-        # enough together that they likely form a single visual element.
+        page_rect = page.rect
+
+        # Text block rects act as separators — any text between two
+        # drawing clusters means they are distinct visual elements
+        separator_rects = [block["rect"] for block in text_blocks]
+
         regions = _cluster_rects(
             [fitz.Rect(d["rect"]) for d in drawings],
-            gap_threshold=20
+            gap_threshold=20,
+            page_rect=page_rect,
+            separator_rects=separator_rects,
+            max_cluster_width_ratio=0.6,
+            max_cluster_height_ratio=0.6
         )
-
-        page_rect = page.rect
 
         for region_idx, region_rect in enumerate(regions):
 
@@ -348,11 +352,10 @@ class DocumentProcessor:
             if region_area < MIN_IMAGE_AREA:
                 continue
 
-            # Expand slightly for padding
+            # Expand slightly for padding, clamped to page bounds
             clip = region_rect + (-4, -4, 4, 4)
-            clip = clip & page_rect   # clamp to page
+            clip = clip & page_rect
 
-            # Render at 2x resolution for sharpness
             mat = fitz.Matrix(2, 2)
             pix = page.get_pixmap(matrix=mat, clip=clip)
 
@@ -474,52 +477,132 @@ class DocumentProcessor:
 # Rect clustering helper (module-level)
 # --------------------------------------------------
 
-def _cluster_rects(rects, gap_threshold=20):
+def _cluster_rects(rects, gap_threshold=20, page_rect=None,
+                   separator_rects=None,
+                   max_cluster_width_ratio=0.6,
+                   max_cluster_height_ratio=0.6):
     """
-    Groups a list of fitz.Rect objects into clusters where any two
-    rects in the same cluster are within gap_threshold points of each other.
-    Returns one merged bounding rect per cluster.
+    Groups drawing rects into clusters representing distinct visual elements.
+
+    Key behaviours vs the naive single-linkage approach:
+    -------------------------------------------------------
+    1. COMPLETE-LINKAGE merge check — two groups only merge if their
+       fully-merged bounding box is within gap_threshold of EVERY member
+       of both groups. This prevents the chain-reaction bridging that causes
+       two side-by-side charts to collapse into one big rect.
+
+    2. TEXT SEPARATOR VETO — if a text block (heading, caption, label)
+       falls between two candidate groups, they are not merged even if
+       they would otherwise be close enough. Text between elements is a
+       reliable signal of a boundary.
+
+    3. SIZE CAP — if merging two groups would produce a rect wider than
+       max_cluster_width_ratio * page_width OR taller than
+       max_cluster_height_ratio * page_height, the merge is rejected.
+       Prevents adjacent charts from becoming a single region.
+
+    Parameters
+    ----------
+    rects               : list of fitz.Rect — drawing element bboxes
+    gap_threshold       : max gap (pts) between elements in the same cluster
+    page_rect           : fitz.Rect of the full page (used for size cap)
+    separator_rects     : list of fitz.Rect for text blocks (separator veto)
+    max_cluster_width_ratio  : max merged width as fraction of page width
+    max_cluster_height_ratio : max merged height as fraction of page height
     """
 
     if not rects:
         return []
 
-    clusters = []   # list of lists of rects
+    separator_rects = separator_rects or []
 
-    for rect in rects:
+    # Each cluster is a list of rects
+    clusters = [[r] for r in rects]
 
-        merged = False
+    def bounding_rect(cluster):
+        return fitz.Rect(
+            min(r.x0 for r in cluster),
+            min(r.y0 for r in cluster),
+            max(r.x1 for r in cluster),
+            max(r.y1 for r in cluster)
+        )
 
-        for cluster in clusters:
+    def gap_between(r1, r2):
+        """Axis-aligned gap between two rects (0 if overlapping)."""
+        dx = max(0.0, max(r1.x0, r2.x0) - min(r1.x1, r2.x1))
+        dy = max(0.0, max(r1.y0, r2.y0) - min(r1.y1, r2.y1))
+        return dx, dy
 
-            # Check if rect is close to any rect already in this cluster
-            for existing in cluster:
+    def text_separates(br_a, br_b):
+        """
+        Returns True if any text block rect lies between the two
+        bounding rects, i.e. it overlaps the gap region between them.
+        """
+        gap_x0 = min(br_a.x1, br_b.x1)
+        gap_x1 = max(br_a.x0, br_b.x0)
+        gap_y0 = min(br_a.y1, br_b.y1)
+        gap_y1 = max(br_a.y0, br_b.y0)
 
-                dx = max(0, max(existing.x0, rect.x0) - min(existing.x1, rect.x1))
-                dy = max(0, max(existing.y0, rect.y0) - min(existing.y1, rect.y1))
+        for sep in separator_rects:
+            # Sep must fall within the gap region between the two clusters
+            if (sep.x0 < gap_x1 and sep.x1 > gap_x0 and
+                    sep.y0 < gap_y1 and sep.y1 > gap_y0):
+                return True
+        return False
 
-                if dx <= gap_threshold and dy <= gap_threshold:
-                    cluster.append(rect)
-                    merged = True
-                    break
+    def can_merge(cluster_a, cluster_b):
+        """
+        Two clusters can merge only if:
+          - Their bounding boxes are within gap_threshold of each other
+          - No text block separates them
+          - The merged bounding box doesn't exceed the size cap
+        """
+        br_a = bounding_rect(cluster_a)
+        br_b = bounding_rect(cluster_b)
 
-            if merged:
-                break
+        dx, dy = gap_between(br_a, br_b)
 
-        if not merged:
-            clusters.append([rect])
+        if dx > gap_threshold or dy > gap_threshold:
+            return False
 
-    # Merge each cluster into a single bounding rect
-    merged_rects = []
+        if text_separates(br_a, br_b):
+            return False
 
-    for cluster in clusters:
-        x0 = min(r.x0 for r in cluster)
-        y0 = min(r.y0 for r in cluster)
-        x1 = max(r.x1 for r in cluster)
-        y1 = max(r.y1 for r in cluster)
-        merged_rects.append(fitz.Rect(x0, y0, x1, y1))
+        if page_rect:
+            merged = fitz.Rect(
+                min(br_a.x0, br_b.x0), min(br_a.y0, br_b.y0),
+                max(br_a.x1, br_b.x1), max(br_a.y1, br_b.y1)
+            )
+            if (merged.width > page_rect.width * max_cluster_width_ratio or
+                    merged.height > page_rect.height * max_cluster_height_ratio):
+                return False
 
-    return merged_rects
+        return True
+
+    # Iteratively merge until no more merges are possible
+    changed = True
+    while changed:
+        changed = False
+        merged_clusters = []
+        used = [False] * len(clusters)
+
+        for i in range(len(clusters)):
+            if used[i]:
+                continue
+            current = clusters[i]
+            for j in range(i + 1, len(clusters)):
+                if used[j]:
+                    continue
+                if can_merge(current, clusters[j]):
+                    current = current + clusters[j]
+                    used[j] = True
+                    changed = True
+            merged_clusters.append(current)
+            used[i] = True
+
+        clusters = merged_clusters
+
+    return [bounding_rect(c) for c in clusters]
 
 
 # --------------------------------------------------

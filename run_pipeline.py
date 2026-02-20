@@ -1,6 +1,5 @@
 import subprocess
 import sys
-import os
 
 
 # --------------------------------------------------
@@ -39,23 +38,21 @@ def main():
          "STEP 0 — Create directories"),
 
         ([python_exec, "process_document.py"],
-         "STEP 1 — Extract multimodal document data"),
+         "STEP 1 — Extract text, tables, and images from PDF"),
 
         ([python_exec, "create_embeddings.py"],
-         "STEP 2 — Generate Titan embeddings"),
+         "STEP 2 — Summarize images/tables via Nova, embed summaries via Titan"),
 
-        ([python_exec, "vector_store.py"],
-         "STEP 3 — Build FAISS index"),
     ]
 
     for command, description in steps:
 
         if not run_command(command, description):
-
             print("\n💥 Pipeline stopped.")
             sys.exit(1)
 
-    print("\n🎉 PIPELINE COMPLETE — Ready for retrieval + QA\n")
+    print("\n🎉 PIPELINE COMPLETE — embedded_items.json ready.")
+    print("   Launch the app with: streamlit run app.py\n")
 
 
 # --------------------------------------------------
