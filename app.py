@@ -1,6 +1,8 @@
-import streamlit as st
+import base64
 import os
 import traceback
+
+import streamlit as st
 
 from vector_store import VectorStore
 from llm_qa import NovaMultimodalQA
@@ -8,188 +10,197 @@ import config
 
 
 # -----------------------------------------------------
-# Streamlit setup
+# Page config
 # -----------------------------------------------------
 
-st.set_page_config(page_title="Multimodal RAG Debug")
+st.set_page_config(
+    page_title="Document QA",
+    page_icon="📄",
+    layout="wide"
+)
 
-st.title("📄 Multimodal RAG — Debug Mode")
-
-
-# -----------------------------------------------------
-# Session state init
-# -----------------------------------------------------
-
-if "vector_store" not in st.session_state:
-    st.session_state.vector_store = None
-
-if "qa_system" not in st.session_state:
-    st.session_state.qa_system = None
-
-if "loaded" not in st.session_state:
-    st.session_state.loaded = False
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+st.title("📄 Document QA")
 
 
 # -----------------------------------------------------
-# DEBUG PANEL — sidebar
+# Session state
 # -----------------------------------------------------
 
-with st.sidebar:
-
-    st.header("🔍 Debug Panel")
-
-    debug_paths = {
-        "PDF": config.PDF_PATH,
-        "Extracted JSON": config.CHUNKS_PATH,
-        "Embedded JSON": config.EMBEDDED_ITEMS_PATH,
-    }
-
-    for label, path in debug_paths.items():
-        exists = os.path.exists(path)
-        st.write(label)
-        st.code(path)
-        st.write("✅ Exists" if exists else "❌ Missing")
-        st.markdown("---")
+for key, default in {
+    "vector_store": None,
+    "qa_system":    None,
+    "loaded":       False,
+    "chat_history": []
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
 # -----------------------------------------------------
-# Pipeline loader
+# Pipeline loader — runs once, silent after success
 # -----------------------------------------------------
 
 if not st.session_state.loaded:
 
-    st.info("🔄 Initializing pipeline...")
+    with st.spinner("Initializing..."):
 
-    try:
+        try:
 
-        if not os.path.exists(config.EMBEDDED_ITEMS_PATH):
-            st.error("Embedded items file missing.")
+            if not os.path.exists(config.EMBEDDED_ITEMS_PATH):
+                st.error("⚠️ Embedded items file not found. Run the pipeline first.")
+                st.stop()
+
+            vector_store = VectorStore()
+            vector_store.load_items(config.EMBEDDED_ITEMS_PATH)
+            vector_store.build_index()
+            st.session_state.vector_store = vector_store
+
+            st.session_state.qa_system = NovaMultimodalQA()
+            st.session_state.loaded    = True
+
+        except Exception as e:
+            st.error(f"Initialization failed: {e}")
             st.stop()
 
-        st.write("Loading vector store...")
 
-        vector_store = VectorStore()
-        vector_store.load_items(config.EMBEDDED_ITEMS_PATH)
-        vector_store.build_index()
+# -----------------------------------------------------
+# Context rendering helpers
+# -----------------------------------------------------
 
-        st.session_state.vector_store = vector_store
+def _load_image_bytes(item):
+    """Return base64 image string — from memory or disk."""
+    if "image" in item:
+        return item["image"]
+    path = item.get("path", "")
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    return None
 
-        st.success("Vector store ready")
 
-        st.write("Initializing Nova QA...")
+def render_context_items(items):
+    """
+    Renders retrieved context items in a collapsible section.
+    - Images  → displayed as images
+    - Tables  → raw data in a collapsed expander
+    - Text    → collapsed if long (> 300 chars)
+    """
 
-        qa = NovaMultimodalQA()
+    with st.expander(f"📎 Retrieved context ({len(items)} items)", expanded=False):
 
-        st.session_state.qa_system = qa
+        for i, item in enumerate(items):
 
-        st.success("QA system ready")
+            item_type = item.get("type", "unknown")
+            page      = item.get("page")
+            page_label = f"Page {page + 1}" if page is not None else ""
 
-        st.session_state.loaded = True
+            # Strip internal score keys before display
+            clean_item = {
+                k: v for k, v in item.items()
+                if not k.startswith("_") and k not in ("embedding", "image", "embedded_text")
+            }
 
-        st.success("🎉 Pipeline initialized!")
+            st.markdown(f"**{i + 1}. {item_type.capitalize()}** {page_label}")
 
-    except Exception as e:
+            if item_type in ("image", "page"):
 
-        st.error("Pipeline initialization failed")
+                image_b64 = _load_image_bytes(item)
 
-        st.text(str(e))
-        st.code(traceback.format_exc())
+                if image_b64:
+                    caption = item.get("caption") or item.get("summary", "")[:120]
+                    st.image(
+                        base64.b64decode(image_b64),
+                        caption=caption or None,
+                        use_container_width=True
+                    )
+                else:
+                    # Fall back to showing the summary as text
+                    summary = item.get("summary", "No summary available.")
+                    st.caption(summary)
 
-        st.session_state.loaded = False
+            elif item_type == "table":
+
+                summary = item.get("summary", "")
+                raw     = item.get("text", "")
+
+                if summary:
+                    st.caption(f"**Summary:** {summary}")
+
+                if raw:
+                    with st.expander("Show raw table data", expanded=False):
+                        st.text(raw)
+
+            elif item_type == "text":
+
+                text = item.get("text", "")
+
+                if len(text) > 300:
+                    with st.expander("Show full text", expanded=False):
+                        st.markdown(text)
+                else:
+                    st.markdown(text)
+
+            st.divider()
 
 
 # -----------------------------------------------------
-# Main app interface
+# Chat history display
 # -----------------------------------------------------
 
-if st.session_state.loaded:
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("context_items"):
+            render_context_items(msg["context_items"])
 
-    st.success("Pipeline ready")
-    st.markdown("---")
 
-    # show chat history
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+# -----------------------------------------------------
+# Query input
+# -----------------------------------------------------
 
-    # user input
-    query = st.chat_input("Ask a question about the document...")
+query = st.chat_input("Ask a question about the document...")
 
-    if query:
+if query:
 
-        st.session_state.chat_history.append({
-            "role": "user",
-            "content": query
-        })
+    # Show user message
+    with st.chat_message("user"):
+        st.markdown(query)
 
-        with st.chat_message("assistant"):
+    st.session_state.chat_history.append({
+        "role":    "user",
+        "content": query
+    })
 
-            try:
+    # Generate and show assistant response
+    with st.chat_message("assistant"):
 
-                st.write("=== DEBUG STEP 1 — QUERY ===")
-                st.code(query)
+        try:
 
-                # -------------------------------------------------
-                # STEP 2 — Embed query
-                # -------------------------------------------------
-
-                st.write("Embedding query...")
-
+            with st.spinner("Searching..."):
                 query_embedding = st.session_state.vector_store.embed_text(query)
-
-                st.write("Embedding size:")
-                st.code(len(query_embedding))
-
-                # -------------------------------------------------
-                # STEP 3 — Vector search
-                # -------------------------------------------------
-
-                st.write("Running vector search...")
-
-                search_results = st.session_state.vector_store.search(
+                search_results  = st.session_state.vector_store.search(
                     query_embedding,
                     query_text=query,
                     k=5
                 )
 
-                st.write("Retrieved items:")
-                st.json(search_results)
+            with st.spinner("Generating answer..."):
+                result = st.session_state.qa_system.generate_answer_with_context(
+                    query,
+                    search_results
+                )
 
-                # -------------------------------------------------
-                # STEP 4 — Nova QA
-                # -------------------------------------------------
+            answer = result["answer"]
 
-                st.write("Calling Nova QA...")
+            st.markdown(answer)
+            render_context_items(search_results)
 
-                try:
+            st.session_state.chat_history.append({
+                "role":         "assistant",
+                "content":      answer,
+                "context_items": search_results
+            })
 
-                    result = st.session_state.qa_system.generate_answer_with_context(
-                        query,
-                        search_results
-                    )
-
-                except Exception as e:
-
-                    st.error(f"QA failure: {e}")
-                    raise
-
-                answer = result["answer"]
-
-                st.markdown(answer)
-
-                st.session_state.chat_history.append({
-                    "role": "assistant",
-                    "content": answer
-                })
-
-            except Exception:
-
-                st.error("❌ Runtime failure")
-                st.code(traceback.format_exc())
-
-else:
-
-    st.error("🚨 Pipeline not initialized")
+        except Exception:
+            st.error("Something went wrong. Please try again.")
+            st.code(traceback.format_exc())
