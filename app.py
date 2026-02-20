@@ -123,6 +123,8 @@ st.markdown(
 
 This project is an end-to-end RAG system that answers natural language questions about a PDF by understanding its text, tables, and images together. The pipeline runs offline to process and index the document, and a Streamlit app serves as the live query interface.
 
+📂 **Example document used for this Demo:** [View on Google Drive](https://drive.google.com/drive/folders/1KGxnFFPKB7O6cfUqjgkV2JlHN1BCxKEk)
+
 ## Key Features
 
 - **Multimodal extraction** — extracts text, tables, and images from the PDF including charts and image-based tables rendered as vector drawings, which standard extractors miss entirely
@@ -130,11 +132,11 @@ This project is an end-to-end RAG system that answers natural language questions
 - **Nova-powered summarisation** — every image and table is described by Amazon Nova Pro before embedding, creating a searchable text representation of visual content
 - **Hybrid BM25 + vector search** — combines dense semantic retrieval with IDF-weighted exact keyword matching, boosting results that contain the precise terms used in the question
 - **Two-stage Nova architecture** — Nova is used once during ingestion to summarise visuals for retrieval, and again at query time to reason over the original images and raw table data when generating answers
-
-
-    📂 **Source document:** [View on Google Drive](https://drive.google.com/drive/folders/1KGxnFFPKB7O6cfUqjgkV2JlHN1BCxKEk)
     """
 )
+
+st.image("assets/table.png", ...)   # your table image
+st.image("assets/figure.png", ...)  # your figure image
 
 st.divider()
 
@@ -144,7 +146,7 @@ st.divider()
 # -----------------------------------------------------
 
 SAMPLE_QUESTIONS = [
-    "What was Qatar's nominal GDP in 2020 in billions of Qatari Riyal",
+    "What was Qatar's nominal GDP in 2020 in billions of Qatari Riyals",
     "Who had the largest share of bank domestic credit in October 2024",
 ]
 
