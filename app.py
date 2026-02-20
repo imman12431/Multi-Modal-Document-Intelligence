@@ -119,11 +119,45 @@ st.title("📄 Multimodal Document QA")
 
 st.markdown(
     """
-    This app lets you ask questions about a PDF document using a multimodal RAG pipeline.
-    Text, tables, and images are all extracted from the document, summarised, and embedded
-    into a searchable vector store. When you ask a question, the most relevant content is
-    retrieved using a hybrid keyword + semantic search and passed to Amazon Nova to generate
-    an answer.
+    ## Multimodal RAG Pipeline — Project Summary
+
+This project is an end-to-end RAG system that answers natural language questions about a PDF by understanding its text, tables, and images together. The pipeline runs offline to process and index the document, and a Streamlit app serves as the live query interface.
+
+---
+
+### Document Ingestion
+
+Content is extracted in four passes per page using PyMuPDF: text chunking, Tabula table extraction, embedded image extraction, and a vector drawing pass using `page.get_drawings()` that captures charts and image-based tables invisible to standard methods. A custom clustering algorithm separates adjacent visual elements using bounding-box gap checks, text separator vetoes, and size caps so nearby charts are never merged into a single crop.
+
+---
+
+### Summarisation
+
+Every image and table is summarised by Amazon Nova Pro before embedding, since raw image vectors optimise for visual similarity rather than relevance to a text question. Summaries are generated in parallel with throttling retry logic, and a content-hash cache persists results to disk so unchanged items are never re-summarised.
+
+---
+
+### Embedding
+
+All items are embedded as text using Amazon Titan Embed Image v1, producing 384-dimensional vectors. Text chunks embed directly, tables and images embed their Nova summary. This keeps the entire vector space text-to-text so question and document embeddings are always semantically comparable.
+
+---
+
+### Hybrid Search
+
+FAISS retrieves a candidate pool using dense vector similarity, which BM25 then re-ranks using IDF-weighted exact keyword matching. Both scores are normalised and combined at equal weight, balancing broad semantic retrieval with precise keyword boosting for domain-specific terms.
+
+---
+
+### Answer Generation
+
+Nova Pro receives text as context blocks, tables as summary plus raw data, and images as actual inline PNG data — not just their summary. This two-stage Nova architecture separates retrieval (text-to-text similarity) from comprehension (vision model reasoning over actual visuals).
+
+---
+
+### Application
+
+The Streamlit app presents a chat interface with sample questions and a collapsible context panel per response, showing which document items drove each answer.
 
     📂 **Source document:** [View on Google Drive](https://drive.google.com/drive/folders/1KGxnFFPKB7O6cfUqjgkV2JlHN1BCxKEk)
     """
@@ -137,8 +171,8 @@ st.divider()
 # -----------------------------------------------------
 
 SAMPLE_QUESTIONS = [
-    "What were the key economic indicators for Qatar in 2024?",
-    "Summarise the main findings from the tables in the document.",
+    "What was Qatar's nominal GDP in 2020 in billions of Qatari Riyal",
+    "Who had the largest share of bank domestic credit in October 2024",
 ]
 
 if not st.session_state.chat_history:
