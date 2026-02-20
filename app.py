@@ -123,7 +123,7 @@ st.markdown(
 
 This project is an end-to-end RAG system that answers natural language questions about a PDF by understanding its text, tables, and images together. The pipeline runs offline to process and index the document, and a Streamlit app serves as the live query interface.
 
-📂 **Example document used for this Demo:** [View on Google Drive](https://drive.google.com/drive/folders/1KGxnFFPKB7O6cfUqjgkV2JlHN1BCxKEk)
+📂 **Example document used for this Demo:** [View on Google Drive](https://drive.google.com/drive/folders/1Cl24giYMDdK9zoMY-eaCX6_PuRK9i-Nw?usp=sharing)
 
 ## Key Features
 
