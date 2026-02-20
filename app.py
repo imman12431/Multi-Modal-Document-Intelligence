@@ -141,7 +141,7 @@ with col1:
     st.image(
         "assets/table.png",
         caption="Example of tabular data in the PDF",
-        width=300
+        width=500
     )
 
 with col2:
