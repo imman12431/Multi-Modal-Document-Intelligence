@@ -135,9 +135,21 @@ This project is an end-to-end RAG system that answers natural language questions
     """
 )
 
-st.image("assets/table.png", ...)   # your table image
-st.image("assets/figure.png", ...)  # your figure image
+col1, col2 = st.columns(2)
 
+with col1:
+    st.image(
+        "assets/table.png",
+        caption="Example of tabular data in the PDF",
+        width=300
+    )
+
+with col2:
+    st.image(
+        "assets/figure.png",
+        caption="Example of figure data in the PDF",
+        width=300
+    )
 st.divider()
 
 
