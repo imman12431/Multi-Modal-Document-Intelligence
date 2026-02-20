@@ -19,18 +19,17 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📄 Document QA")
-
 
 # -----------------------------------------------------
 # Session state
 # -----------------------------------------------------
 
 for key, default in {
-    "vector_store": None,
-    "qa_system":    None,
-    "loaded":       False,
-    "chat_history": []
+    "vector_store":  None,
+    "qa_system":     None,
+    "loaded":        False,
+    "chat_history":  [],
+    "sample_query":  None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -54,9 +53,8 @@ if not st.session_state.loaded:
             vector_store.load_items(config.EMBEDDED_ITEMS_PATH)
             vector_store.build_index()
             st.session_state.vector_store = vector_store
-
-            st.session_state.qa_system = NovaMultimodalQA()
-            st.session_state.loaded    = True
+            st.session_state.qa_system    = NovaMultimodalQA()
+            st.session_state.loaded       = True
 
         except Exception as e:
             st.error(f"Initialization failed: {e}")
@@ -64,59 +62,29 @@ if not st.session_state.loaded:
 
 
 # -----------------------------------------------------
-# Context rendering helpers
+# Context rendering helper
 # -----------------------------------------------------
-
-def _load_image_bytes(item):
-    """Return base64 image string — from memory or disk."""
-    if "image" in item:
-        return item["image"]
-    path = item.get("path", "")
-    if path and os.path.exists(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-    return None
-
 
 def render_context_items(items):
     """
     Renders retrieved context items in a collapsible section.
-    - Images  → displayed as images
-    - Tables  → raw data in a collapsed expander
-    - Text    → collapsed if long (> 300 chars)
+    Images and tables show their summary; text collapsed if long.
     """
 
     with st.expander(f"📎 Retrieved context ({len(items)} items)", expanded=False):
 
         for i, item in enumerate(items):
 
-            item_type = item.get("type", "unknown")
-            page      = item.get("page")
+            item_type  = item.get("type", "unknown")
+            page       = item.get("page")
             page_label = f"Page {page + 1}" if page is not None else ""
-
-            # Strip internal score keys before display
-            clean_item = {
-                k: v for k, v in item.items()
-                if not k.startswith("_") and k not in ("embedding", "image", "embedded_text")
-            }
 
             st.markdown(f"**{i + 1}. {item_type.capitalize()}** {page_label}")
 
             if item_type in ("image", "page"):
 
-                image_b64 = _load_image_bytes(item)
-
-                if image_b64:
-                    caption = item.get("caption") or item.get("summary", "")[:120]
-                    st.image(
-                        base64.b64decode(image_b64),
-                        caption=caption or None,
-                        use_container_width=True
-                    )
-                else:
-                    # Fall back to showing the summary as text
-                    summary = item.get("summary", "No summary available.")
-                    st.caption(summary)
+                summary = item.get("summary", "No summary available.")
+                st.caption(summary)
 
             elif item_type == "table":
 
@@ -124,7 +92,7 @@ def render_context_items(items):
                 raw     = item.get("text", "")
 
                 if summary:
-                    st.caption(f"**Summary:** {summary}")
+                    st.caption(summary)
 
                 if raw:
                     with st.expander("Show raw table data", expanded=False):
@@ -144,6 +112,51 @@ def render_context_items(items):
 
 
 # -----------------------------------------------------
+# Header — title, about, document link
+# -----------------------------------------------------
+
+st.title("📄 Multimodal Document QA")
+
+st.markdown(
+    """
+    This app lets you ask questions about a PDF document using a multimodal RAG pipeline.
+    Text, tables, and images are all extracted from the document, summarised, and embedded
+    into a searchable vector store. When you ask a question, the most relevant content is
+    retrieved using a hybrid keyword + semantic search and passed to Amazon Nova to generate
+    an answer.
+
+    📂 **Source document:** [View on Google Drive](https://drive.google.com/drive/folders/1KGxnFFPKB7O6cfUqjgkV2JlHN1BCxKEk)
+    """
+)
+
+st.divider()
+
+
+# -----------------------------------------------------
+# Sample questions
+# -----------------------------------------------------
+
+SAMPLE_QUESTIONS = [
+    "What were the key economic indicators for Qatar in 2024?",
+    "Summarise the main findings from the tables in the document.",
+]
+
+if not st.session_state.chat_history:
+
+    st.markdown("**Try a sample question:**")
+
+    cols = st.columns(len(SAMPLE_QUESTIONS))
+
+    for col, question in zip(cols, SAMPLE_QUESTIONS):
+        with col:
+            if st.button(question, use_container_width=True):
+                st.session_state.sample_query = question
+                st.rerun()
+
+    st.divider()
+
+
+# -----------------------------------------------------
 # Chat history display
 # -----------------------------------------------------
 
@@ -155,14 +168,17 @@ for msg in st.session_state.chat_history:
 
 
 # -----------------------------------------------------
-# Query input
+# Resolve query — either from sample button or chat input
 # -----------------------------------------------------
 
 query = st.chat_input("Ask a question about the document...")
 
+if st.session_state.sample_query:
+    query = st.session_state.sample_query
+    st.session_state.sample_query = None
+
 if query:
 
-    # Show user message
     with st.chat_message("user"):
         st.markdown(query)
 
@@ -171,7 +187,6 @@ if query:
         "content": query
     })
 
-    # Generate and show assistant response
     with st.chat_message("assistant"):
 
         try:
@@ -196,8 +211,8 @@ if query:
             render_context_items(search_results)
 
             st.session_state.chat_history.append({
-                "role":         "assistant",
-                "content":      answer,
+                "role":          "assistant",
+                "content":       answer,
                 "context_items": search_results
             })
 
