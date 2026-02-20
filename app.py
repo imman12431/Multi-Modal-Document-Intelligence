@@ -123,41 +123,14 @@ st.markdown(
 
 This project is an end-to-end RAG system that answers natural language questions about a PDF by understanding its text, tables, and images together. The pipeline runs offline to process and index the document, and a Streamlit app serves as the live query interface.
 
----
+    ## Key Features
 
-### Document Ingestion
+- **Multimodal extraction** — extracts text, tables, and images from the PDF including charts and image-based tables rendered as vector drawings, which standard extractors miss entirely
+- **Layout-aware clustering** — separates adjacent visual elements on the same page using bounding-box gap checks, text separator vetoes, and size caps so side-by-side charts are never merged into one
+- **Nova-powered summarisation** — every image and table is described by Amazon Nova Pro before embedding, creating a searchable text representation of visual content
+- **Hybrid BM25 + vector search** — combines dense semantic retrieval with IDF-weighted exact keyword matching, boosting results that contain the precise terms used in the question
+- **Two-stage Nova architecture** — Nova is used once during ingestion to summarise visuals for retrieval, and again at query time to reason over the original images and raw table data when generating answers
 
-Content is extracted in four passes per page using PyMuPDF: text chunking, Tabula table extraction, embedded image extraction, and a vector drawing pass using `page.get_drawings()` that captures charts and image-based tables invisible to standard methods. A custom clustering algorithm separates adjacent visual elements using bounding-box gap checks, text separator vetoes, and size caps so nearby charts are never merged into a single crop.
-
----
-
-### Summarisation
-
-Every image and table is summarised by Amazon Nova Pro before embedding, since raw image vectors optimise for visual similarity rather than relevance to a text question. Summaries are generated in parallel with throttling retry logic, and a content-hash cache persists results to disk so unchanged items are never re-summarised.
-
----
-
-### Embedding
-
-All items are embedded as text using Amazon Titan Embed Image v1, producing 384-dimensional vectors. Text chunks embed directly, tables and images embed their Nova summary. This keeps the entire vector space text-to-text so question and document embeddings are always semantically comparable.
-
----
-
-### Hybrid Search
-
-FAISS retrieves a candidate pool using dense vector similarity, which BM25 then re-ranks using IDF-weighted exact keyword matching. Both scores are normalised and combined at equal weight, balancing broad semantic retrieval with precise keyword boosting for domain-specific terms.
-
----
-
-### Answer Generation
-
-Nova Pro receives text as context blocks, tables as summary plus raw data, and images as actual inline PNG data — not just their summary. This two-stage Nova architecture separates retrieval (text-to-text similarity) from comprehension (vision model reasoning over actual visuals).
-
----
-
-### Application
-
-The Streamlit app presents a chat interface with sample questions and a collapsible context panel per response, showing which document items drove each answer.
 
     📂 **Source document:** [View on Google Drive](https://drive.google.com/drive/folders/1KGxnFFPKB7O6cfUqjgkV2JlHN1BCxKEk)
     """
