@@ -2,6 +2,7 @@ import os
 import base64
 from tqdm import tqdm
 import fitz  # PyMuPDF
+import tabula
 import pandas as pd
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -248,6 +249,10 @@ class DocumentProcessor:
     # Format raw tabula output as a markdown table
     # --------------------------------------------------
 
+    # --------------------------------------------------
+    # Format raw tabula output as a markdown table
+    # --------------------------------------------------
+
     def _format_table_as_markdown(self, raw_text):
         """
         Converts raw tabula pipe/CSV output to a markdown table.
@@ -283,23 +288,20 @@ class DocumentProcessor:
         return f"{header}\n{divider}\n{body}"
 
     # --------------------------------------------------
-    # Format 2D row list → markdown (for pdfplumber output)
+    # Format 2D row list → markdown (pdfplumber output)
     # --------------------------------------------------
 
     def _format_table_as_markdown_rows(self, rows):
         """
-        Converts a 2D list of strings (as returned by pdfplumber)
-        directly into a markdown table, without going through CSV.
-        Preserves cell values exactly — no re-splitting on commas
-        or pipes that may appear inside cell text.
+        Converts pdfplumber's native 2D list directly to markdown.
+        Avoids CSV round-trip so pipes/commas in cell text are preserved.
         """
-
         if not rows or len(rows) < 2:
             return ""
 
         max_cols = max(len(row) for row in rows)
         rows = [row + [""] * (max_cols - len(row)) for row in rows]
-        rows = [[str(cell).strip() if cell is not None else "" for cell in row]
+        rows = [[str(c).strip() if c is not None else "" for c in row]
                 for row in rows]
 
         header  = "| " + " | ".join(rows[0]) + " |"
@@ -309,119 +311,95 @@ class DocumentProcessor:
         return f"{header}\n{divider}\n{body}"
 
     # --------------------------------------------------
-    # Table validation — reject false positives
+    # TABLES — pdfplumber primary, tabula fallback
     # --------------------------------------------------
 
-    def _is_real_table(self, df, page_num=None, idx=None):
+    def _process_tables_tabula(self, page_num):
         """
-        Rejects dataframes that are almost certainly not real tables.
-        Thresholds are loose because pdfplumber is already a reliable
-        detector — we only want to catch obvious false positives like
-        single-column footnote blocks or 1-row caption rows.
-        """
+        Two-stage table extraction:
 
-        label = f"page {page_num} table {idx}" if page_num is not None else "table"
+        Stage 1 — pdfplumber with explicit column detection
+            For each table region, pdfplumber snaps column boundaries
+            from the x-positions of words in the header row. This handles
+            borderless tables (like the Qatar macro indicators table) where
+            tabula sees the whole row as one cell because there are no
+            vertical ruling lines to split on.
 
-        total_cells = df.size
-        empty_cells = df.isnull().sum().sum() + (df == "").sum().sum()
-        empty_ratio = empty_cells / total_cells if total_cells > 0 else 1.0
-        all_text = " ".join(str(v) for v in df.values.flatten() if v)
-        words = all_text.split()
-        cells_with_content = max(total_cells - empty_cells, 1)
-        avg_words_per_cell = len(words) / cells_with_content
+        Stage 2 — tabula fallback
+            Only runs if pdfplumber finds no tables at all on the page.
+            Kept as a safety net for edge cases.
 
-        print(f"  [validate] {label}: "
-              f"rows={len(df)}, cols={len(df.columns)}, "
-              f"empty_ratio={empty_ratio:.2f}, "
-              f"avg_words_per_cell={avg_words_per_cell:.1f}")
-
-        if len(df) < 2:
-            print(f"  [validate] {label}: ✗ REJECTED — fewer than 2 rows")
-            return False
-
-        if len(df.columns) < 2:
-            print(f"  [validate] {label}: ✗ REJECTED — fewer than 2 columns")
-            return False
-
-        if empty_ratio > 0.85:
-            print(f"  [validate] {label}: ✗ REJECTED — empty_ratio {empty_ratio:.2f} > 0.85")
-            return False
-
-        if avg_words_per_cell > 20:
-            print(f"  [validate] {label}: ✗ REJECTED — avg_words_per_cell {avg_words_per_cell:.1f} > 20")
-            return False
-
-        print(f"  [validate] {label}: ✓ ACCEPTED")
-        return True
-
-    # --------------------------------------------------
-    # TABLES — extract via pdfplumber (primary)
-    # --------------------------------------------------
-
-    def _process_tables_tabula(self, page, page_num):
-        """
-        Extracts tables using pdfplumber as primary extractor.
-        pdfplumber handles complex layouts far better than tabula:
-          - Spanning headers (e.g. "Projections" over multiple columns)
-          - Indented row labels (sub-rows don't create phantom columns)
-          - Dense numeric tables with consistent column alignment
-
-        Each table's bbox is claimed immediately so _process_text
-        skips that region regardless of whether it passes validation.
+        Both stages claim bounding boxes into _claimed_rects so
+        _process_text skips those regions.
         """
 
-        try:
-            import pdfplumber
-        except ImportError:
-            print(f"  ⚠ pdfplumber not installed — skipping table extraction")
-            return
+        import pdfplumber
+
+        pdfplumber_saved = False
 
         try:
             with pdfplumber.open(self.pdf_path) as pdf:
                 pl_page = pdf.pages[page_num]
+
+                # Use explicit_vertical_lines strategy so pdfplumber can
+                # handle borderless tables — derive column positions from
+                # the x-coordinates of all words on the page
+                words = pl_page.extract_words()
+
+                if not words:
+                    raise ValueError("no words on page")
+
+                # Collect unique x0 positions of words — these are the
+                # natural column start positions in the PDF
+                x_positions = sorted(set(round(w["x0"]) for w in words))
+
+                # Use pdfplumber's text-based table detection first
                 tables = pl_page.find_tables()
 
                 if not tables:
-                    return
+                    # Fall back to explicit vertical lines strategy
+                    table_settings = {
+                        "vertical_strategy": "explicit",
+                        "horizontal_strategy": "lines",
+                        "explicit_vertical_lines": x_positions,
+                        "snap_tolerance": 5,
+                        "join_tolerance": 3,
+                        "edge_min_length": 3,
+                        "min_words_vertical": 1,
+                        "min_words_horizontal": 1,
+                    }
+                    tables = pl_page.find_tables(table_settings)
 
-                print(f"  [pdfplumber] page {page_num}: found {len(tables)} candidate(s)")
+                if not tables:
+                    raise ValueError("pdfplumber found no tables")
 
                 for idx, table_obj in enumerate(tables):
 
-                    # Claim bbox immediately — even if table fails validation
-                    # we don't want its cell text extracted as prose
-                    bbox = table_obj.bbox  # (x0, top, x1, bottom)
-                    claimed_rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
-
+                    # Claim bbox
+                    bbox = table_obj.bbox
                     if page_num not in self._claimed_rects:
                         self._claimed_rects[page_num] = []
-                    self._claimed_rects[page_num].append(claimed_rect)
+                    self._claimed_rects[page_num].append(
+                        fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
+                    )
 
-                    # Extract as 2D list — pdfplumber returns None for empty cells
                     rows = table_obj.extract()
-
                     if not rows or len(rows) < 2:
-                        print(f"  [pdfplumber] page {page_num} table {idx}: skipped — fewer than 2 rows extracted")
                         continue
 
                     # Replace None with empty string
-                    rows = [
-                        [cell if cell is not None else "" for cell in row]
-                        for row in rows
-                    ]
+                    rows = [[c if c is not None else "" for c in row]
+                            for row in rows]
 
-                    # Validate
-                    df = pd.DataFrame(rows[1:], columns=rows[0])
-
-                    if not self._is_real_table(df, page_num=page_num, idx=idx):
+                    # Skip if it looks like the whole table collapsed
+                    # into one column (tabula-style failure)
+                    if len(rows[0]) < 3:
+                        print(f"  [pdfplumber] page {page_num} table {idx}: "
+                              f"skipped — only {len(rows[0])} col(s) detected")
                         continue
 
-                    # Convert directly to markdown — no CSV round-trip
-                    # so pipes/commas inside cell text are preserved
                     table_text = self._format_table_as_markdown_rows(rows)
-
                     if not table_text:
-                        print(f"  [pdfplumber] page {page_num} table {idx}: skipped — empty after formatting")
                         continue
 
                     file_name = os.path.join(
@@ -439,11 +417,69 @@ class DocumentProcessor:
                         "path": file_name
                     })
 
-                    print(f"  [pdfplumber] page {page_num} table {idx}: ✅ saved — "
+                    pdfplumber_saved = True
+                    print(f"  ✅ [pdfplumber] Table saved — page {page_num}, "
                           f"{len(rows)-1} rows × {len(rows[0])} cols")
 
         except Exception as e:
-            print(f"  ⚠ Table extraction failed page {page_num}: {e}")
+            if "no tables" not in str(e) and "no words" not in str(e):
+                print(f"  ⚠ pdfplumber failed page {page_num}: {e}")
+
+        # ── Tabula fallback ──────────────────────────────────────────────
+        if pdfplumber_saved:
+            return
+
+        try:
+            tables = tabula.read_pdf(
+                self.pdf_path,
+                pages=page_num + 1,
+                multiple_tables=True,
+                silent=True
+            )
+
+            if not tables:
+                return
+
+            for idx, table in enumerate(tables):
+
+                if table.empty:
+                    continue
+
+                table = table.fillna("")
+
+                # Skip if tabula collapsed everything into one column
+                if len(table.columns) < 3:
+                    print(f"  [tabula] page {page_num} table {idx}: "
+                          f"skipped — only {len(table.columns)} col(s)")
+                    continue
+
+                table_text = self._format_table_as_markdown(
+                    table.to_csv(index=False, sep="|").strip()
+                )
+
+                if not table_text:
+                    continue
+
+                file_name = os.path.join(
+                    self.base_dir, "tables",
+                    f"{os.path.basename(self.pdf_path)}_table_{page_num}_{idx}.txt"
+                )
+
+                with open(file_name, "w", encoding="utf-8") as f:
+                    f.write(table_text)
+
+                self.items.append({
+                    "type": "table",
+                    "page": page_num,
+                    "text": table_text,
+                    "path": file_name
+                })
+
+                print(f"  ✅ [tabula] Table saved — page {page_num}, "
+                      f"{len(table)} rows × {len(table.columns)} cols")
+
+        except Exception as e:
+            print(f"  ⚠ Tabula fallback failed page {page_num}: {e}")
 
 
     # --------------------------------------------------
@@ -703,7 +739,7 @@ class DocumentProcessor:
             text_blocks = self._get_text_blocks(page)
 
             # --- Tables first — claims their rects before text runs ---
-            self._process_tables_tabula(page, page_num)
+            self._process_tables_tabula(page_num)
 
             # --- Embedded images — claims their rects ---
             self._process_embedded_images(page, page_num, text_blocks)
