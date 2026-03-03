@@ -404,11 +404,17 @@ class DocumentProcessor:
             # --------------------------------------------------
 
             LABEL_ABSORB_PTS = 40   # how far outside the cluster to look
+            MAX_LABEL_WORDS  = 30   # axis labels/titles are short — ignore paragraphs
 
             expanded = fitz.Rect(region_rect)  # start from cluster boundary
 
             for block in text_blocks:
                 br = block["rect"]
+
+                # Ignore long text blocks — body paragraphs, not annotations
+                word_count = len(block["text"].split())
+                if word_count > MAX_LABEL_WORDS:
+                    continue
 
                 # Is this text block close to the cluster?
                 dx = max(0.0, max(region_rect.x0, br.x0) - min(region_rect.x1, br.x1))
