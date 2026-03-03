@@ -196,6 +196,44 @@ class DocumentProcessor:
             })
 
     # --------------------------------------------------
+    # Format raw tabula output as a markdown table
+    # --------------------------------------------------
+
+    def _format_table_as_markdown(self, raw_text):
+        """
+        Converts raw tabula pipe/CSV output to a markdown table.
+        Stored at extraction time so both the summarizer and the
+        QA system receive clean, structured input.
+        """
+
+        if not raw_text or not raw_text.strip():
+            return raw_text
+
+        lines = [l for l in raw_text.strip().split("\n") if l.strip()]
+
+        if len(lines) < 2:
+            return raw_text
+
+        # Detect delimiter — tabula uses | (our config) or , by default
+        delimiter = "|" if "|" in lines[0] else ","
+
+        rows = [line.split(delimiter) for line in lines]
+
+        # Normalize all rows to the same column count
+        max_cols = max(len(row) for row in rows)
+        rows = [row + [""] * (max_cols - len(row)) for row in rows]
+
+        # Clean up whitespace in each cell
+        rows = [[cell.strip() for cell in row] for row in rows]
+
+        # Build markdown table
+        header  = "| " + " | ".join(rows[0]) + " |"
+        divider = "| " + " | ".join(["---"] * max_cols) + " |"
+        body    = "\n".join("| " + " | ".join(row) + " |" for row in rows[1:])
+
+        return f"{header}\n{divider}\n{body}"
+
+    # --------------------------------------------------
     # TABLES — text-layer tables via tabula
     # --------------------------------------------------
 
@@ -225,7 +263,9 @@ class DocumentProcessor:
                 # Replace NaN with empty string for clean output
                 table = table.fillna("")
 
-                table_text = table.to_csv(index=False, sep="|").strip()
+                table_text = self._format_table_as_markdown(
+                    table.to_csv(index=False, sep="|").strip()
+                )
 
                 if not table_text:
                     continue

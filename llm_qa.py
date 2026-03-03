@@ -104,7 +104,7 @@ class NovaMultimodalQA:
                     )
                 if raw:
                     text_context_parts.append(
-                        f"[Table {page_label} — Raw Data]\n{raw}"
+                        f"[Table {page_label} — Data]\n{raw}"
                     )
 
             elif item_type in ("image", "page"):
