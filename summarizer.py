@@ -48,11 +48,21 @@ CACHE_PATH = os.path.join(
 
 IMAGE_SUMMARY_PROMPT = (
     "You are analyzing an image extracted from a PDF document. "
-    "Describe everything you can see in this image in detail: "
-    "any text, numbers, labels, trends, structure, or visual content. "
-    "If it appears to be a chart or graph, describe the axes, data, and key takeaways. "
-    "If it appears to be a table rendered as an image, transcribe its contents as accurately as possible. "
-    "Be specific and thorough — this summary will be used to match the image to user questions."
+    "Describe everything you can see in detail. "
+    
+    "If it is a BAR CHART or COLUMN CHART: "
+    "read every bar value as precisely as possible from the axis scale, "
+    "and list them explicitly as: 'Category: value%'. "
+    "Do not say values are unavailable — estimate from the scale if needed. "
+    
+    "If it is a LINE CHART: "
+    "identify key data points, peaks, troughs, and the start/end values. "
+    
+    "If it is a TABLE rendered as an image: "
+    "transcribe every row and column value into a markdown table. "
+    
+    "Be specific with numbers — summaries like 'the public sector had the highest bar' "
+    "are not useful. Instead write: 'Public sector: ~48%, Services: ~18%, Trade: ~12%'."
 )
 
 TABLE_SUMMARY_PROMPT = (
