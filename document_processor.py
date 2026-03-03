@@ -2,7 +2,6 @@ import os
 import base64
 from tqdm import tqdm
 import fitz  # PyMuPDF
-import tabula
 import pandas as pd
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -284,85 +283,168 @@ class DocumentProcessor:
         return f"{header}\n{divider}\n{body}"
 
     # --------------------------------------------------
-    # TABLES — text-layer tables via tabula
+    # Format 2D row list → markdown (for pdfplumber output)
+    # --------------------------------------------------
+
+    def _format_table_as_markdown_rows(self, rows):
+        """
+        Converts a 2D list of strings (as returned by pdfplumber)
+        directly into a markdown table, without going through CSV.
+        Preserves cell values exactly — no re-splitting on commas
+        or pipes that may appear inside cell text.
+        """
+
+        if not rows or len(rows) < 2:
+            return ""
+
+        max_cols = max(len(row) for row in rows)
+        rows = [row + [""] * (max_cols - len(row)) for row in rows]
+        rows = [[str(cell).strip() if cell is not None else "" for cell in row]
+                for row in rows]
+
+        header  = "| " + " | ".join(rows[0]) + " |"
+        divider = "| " + " | ".join(["---"] * max_cols) + " |"
+        body    = "\n".join("| " + " | ".join(row) + " |" for row in rows[1:])
+
+        return f"{header}\n{divider}\n{body}"
+
+    # --------------------------------------------------
+    # Table validation — reject false positives
+    # --------------------------------------------------
+
+    def _is_real_table(self, df, page_num=None, idx=None):
+        """
+        Rejects dataframes that are almost certainly not real tables.
+        Thresholds are loose because pdfplumber is already a reliable
+        detector — we only want to catch obvious false positives like
+        single-column footnote blocks or 1-row caption rows.
+        """
+
+        label = f"page {page_num} table {idx}" if page_num is not None else "table"
+
+        total_cells = df.size
+        empty_cells = df.isnull().sum().sum() + (df == "").sum().sum()
+        empty_ratio = empty_cells / total_cells if total_cells > 0 else 1.0
+        all_text = " ".join(str(v) for v in df.values.flatten() if v)
+        words = all_text.split()
+        cells_with_content = max(total_cells - empty_cells, 1)
+        avg_words_per_cell = len(words) / cells_with_content
+
+        print(f"  [validate] {label}: "
+              f"rows={len(df)}, cols={len(df.columns)}, "
+              f"empty_ratio={empty_ratio:.2f}, "
+              f"avg_words_per_cell={avg_words_per_cell:.1f}")
+
+        if len(df) < 2:
+            print(f"  [validate] {label}: ✗ REJECTED — fewer than 2 rows")
+            return False
+
+        if len(df.columns) < 2:
+            print(f"  [validate] {label}: ✗ REJECTED — fewer than 2 columns")
+            return False
+
+        if empty_ratio > 0.85:
+            print(f"  [validate] {label}: ✗ REJECTED — empty_ratio {empty_ratio:.2f} > 0.85")
+            return False
+
+        if avg_words_per_cell > 20:
+            print(f"  [validate] {label}: ✗ REJECTED — avg_words_per_cell {avg_words_per_cell:.1f} > 20")
+            return False
+
+        print(f"  [validate] {label}: ✓ ACCEPTED")
+        return True
+
+    # --------------------------------------------------
+    # TABLES — extract via pdfplumber (primary)
     # --------------------------------------------------
 
     def _process_tables_tabula(self, page, page_num):
         """
-        Use tabula for text-layer tables. Also claims the bounding rect
-        of each detected table so _process_text skips that region.
+        Extracts tables using pdfplumber as primary extractor.
+        pdfplumber handles complex layouts far better than tabula:
+          - Spanning headers (e.g. "Projections" over multiple columns)
+          - Indented row labels (sub-rows don't create phantom columns)
+          - Dense numeric tables with consistent column alignment
+
+        Each table's bbox is claimed immediately so _process_text
+        skips that region regardless of whether it passes validation.
         """
 
         try:
+            import pdfplumber
+        except ImportError:
+            print(f"  ⚠ pdfplumber not installed — skipping table extraction")
+            return
 
-            tables = tabula.read_pdf(
-                self.pdf_path,
-                pages=page_num + 1,
-                multiple_tables=True,
-                silent=True,
-                guess=True,
-                pandas_options={"header": 0}
-            )
+        try:
+            with pdfplumber.open(self.pdf_path) as pdf:
+                pl_page = pdf.pages[page_num]
+                tables = pl_page.find_tables()
 
-            if not tables:
-                return
+                if not tables:
+                    return
 
-            # Get table bounding boxes from pdfplumber for rect claiming
-            # (tabula doesn't expose bbox, but pdfplumber does)
-            table_bboxes = []
-            try:
-                import pdfplumber
-                with pdfplumber.open(self.pdf_path) as pdf:
-                    pl_page = pdf.pages[page_num]
-                    for t in pl_page.find_tables():
-                        bbox = t.bbox  # (x0, top, x1, bottom)
-                        table_bboxes.append(
-                            fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
-                        )
-            except Exception:
-                pass  # pdfplumber optional — rect claiming just won't apply
+                print(f"  [pdfplumber] page {page_num}: found {len(tables)} candidate(s)")
 
-            # Register claimed rects for this page
-            if table_bboxes:
-                if page_num not in self._claimed_rects:
-                    self._claimed_rects[page_num] = []
-                self._claimed_rects[page_num].extend(table_bboxes)
+                for idx, table_obj in enumerate(tables):
 
-            for idx, table in enumerate(tables):
+                    # Claim bbox immediately — even if table fails validation
+                    # we don't want its cell text extracted as prose
+                    bbox = table_obj.bbox  # (x0, top, x1, bottom)
+                    claimed_rect = fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
 
-                if table.empty:
-                    continue
+                    if page_num not in self._claimed_rects:
+                        self._claimed_rects[page_num] = []
+                    self._claimed_rects[page_num].append(claimed_rect)
 
-                if not self._is_real_table(table):
-                    print(f"  ↷ Skipping likely false-positive table on page {page_num}")
-                    continue
+                    # Extract as 2D list — pdfplumber returns None for empty cells
+                    rows = table_obj.extract()
 
-                table = table.fillna("")
+                    if not rows or len(rows) < 2:
+                        print(f"  [pdfplumber] page {page_num} table {idx}: skipped — fewer than 2 rows extracted")
+                        continue
 
-                table_text = self._format_table_as_markdown(
-                    table.to_csv(index=False, sep="|").strip()
-                )
+                    # Replace None with empty string
+                    rows = [
+                        [cell if cell is not None else "" for cell in row]
+                        for row in rows
+                    ]
 
-                if not table_text:
-                    continue
+                    # Validate
+                    df = pd.DataFrame(rows[1:], columns=rows[0])
 
-                file_name = os.path.join(
-                    self.base_dir, "tables",
-                    f"{os.path.basename(self.pdf_path)}_table_{page_num}_{idx}.txt"
-                )
+                    if not self._is_real_table(df, page_num=page_num, idx=idx):
+                        continue
 
-                with open(file_name, "w", encoding="utf-8") as f:
-                    f.write(table_text)
+                    # Convert directly to markdown — no CSV round-trip
+                    # so pipes/commas inside cell text are preserved
+                    table_text = self._format_table_as_markdown_rows(rows)
 
-                self.items.append({
-                    "type": "table",
-                    "page": page_num,
-                    "text": table_text,
-                    "path": file_name
-                })
+                    if not table_text:
+                        print(f"  [pdfplumber] page {page_num} table {idx}: skipped — empty after formatting")
+                        continue
+
+                    file_name = os.path.join(
+                        self.base_dir, "tables",
+                        f"{os.path.basename(self.pdf_path)}_table_{page_num}_{idx}.txt"
+                    )
+
+                    with open(file_name, "w", encoding="utf-8") as f:
+                        f.write(table_text)
+
+                    self.items.append({
+                        "type": "table",
+                        "page": page_num,
+                        "text": table_text,
+                        "path": file_name
+                    })
+
+                    print(f"  [pdfplumber] page {page_num} table {idx}: ✅ saved — "
+                          f"{len(rows)-1} rows × {len(rows[0])} cols")
 
         except Exception as e:
-            print(f"  ⚠ Tabula failed page {page_num}: {e}")
+            print(f"  ⚠ Table extraction failed page {page_num}: {e}")
+
 
     # --------------------------------------------------
     # IMAGES — embedded XObjects (e.g. photos, logos)
