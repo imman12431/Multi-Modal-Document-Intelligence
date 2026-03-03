@@ -376,7 +376,7 @@ class DocumentProcessor:
             page_rect=page_rect,
             separator_rects=separator_rects,
             max_cluster_width_ratio=0.6,
-            max_cluster_height_ratio=0.6
+            max_cluster_height_ratio=0.45
         )
 
         for region_idx, region_rect in enumerate(regions):
@@ -392,8 +392,49 @@ class DocumentProcessor:
             if region_area < MIN_IMAGE_AREA:
                 continue
 
-            # Expand slightly for padding, clamped to page bounds
-            clip = region_rect + (-4, -4, 4, 4)
+            # --------------------------------------------------
+            # Expand the crop to include nearby text elements
+            # (axis labels, tick values, titles, legends, footnotes)
+            # that sit just outside the drawn boundary of the cluster.
+            #
+            # Strategy: absorb any text block whose rect is within
+            # LABEL_ABSORB_PTS of the cluster bounding box, as long
+            # as expanding to include it doesn't cause the crop to
+            # overlap a different cluster.
+            # --------------------------------------------------
+
+            LABEL_ABSORB_PTS = 40   # how far outside the cluster to look
+
+            expanded = fitz.Rect(region_rect)  # start from cluster boundary
+
+            for block in text_blocks:
+                br = block["rect"]
+
+                # Is this text block close to the cluster?
+                dx = max(0.0, max(region_rect.x0, br.x0) - min(region_rect.x1, br.x1))
+                dy = max(0.0, max(region_rect.y0, br.y0) - min(region_rect.y1, br.y1))
+
+                if dx > LABEL_ABSORB_PTS or dy > LABEL_ABSORB_PTS:
+                    continue  # too far away
+
+                # Would absorbing this block cause us to overlap another cluster?
+                candidate = expanded | br   # union
+
+                overlaps_other = any(
+                    other_rect != region_rect and
+                    candidate.intersects(other_rect) and
+                    not region_rect.intersects(other_rect)
+                    for other_rect in regions
+                )
+
+                if overlaps_other:
+                    continue  # skip — would bleed into an adjacent figure
+
+                expanded = candidate
+
+            # Add a small fixed padding on top of the expanded rect,
+            # then clamp to page bounds
+            clip = expanded + (-6, -6, 6, 6)
             clip = clip & page_rect
 
             mat = fitz.Matrix(2, 2)
@@ -520,7 +561,7 @@ class DocumentProcessor:
 def _cluster_rects(rects, gap_threshold=20, page_rect=None,
                    separator_rects=None,
                    max_cluster_width_ratio=0.6,
-                   max_cluster_height_ratio=0.6):
+                   max_cluster_height_ratio=0.45):
     """
     Groups drawing rects into clusters representing distinct visual elements.
 
@@ -549,6 +590,9 @@ def _cluster_rects(rects, gap_threshold=20, page_rect=None,
     separator_rects     : list of fitz.Rect for text blocks (separator veto)
     max_cluster_width_ratio  : max merged width as fraction of page width
     max_cluster_height_ratio : max merged height as fraction of page height
+                               (0.45 means a single figure can be at most
+                               45% of page height — prevents two stacked
+                               half-page charts from merging)
     """
 
     if not rects:
@@ -575,19 +619,48 @@ def _cluster_rects(rects, gap_threshold=20, page_rect=None,
 
     def text_separates(br_a, br_b):
         """
-        Returns True if any text block rect lies between the two
-        bounding rects, i.e. it overlaps the gap region between them.
+        Returns True if any text block lies in the gap region between
+        the two clusters.
+
+        For two vertically stacked figures:
+
+            ┌─────────────┐
+            │  cluster A  │  y0=100  y1=300
+            └─────────────┘
+               "Figure 1"    ← caption at y0=310  y1=325   (in the gap)
+            ┌─────────────┐
+            │  cluster B  │  y0=340  y1=540
+            └─────────────┘
+
+        The vertical gap is y1 of the upper cluster → y0 of the lower:
+            gap_y0 = min(br_a.y1, br_b.y1) = 300   (bottom of upper)
+            gap_y1 = max(br_a.y0, br_b.y0) = 340   (top of lower)
+
+        The horizontal span of the gap matches the shared width of the
+        two clusters so a caption that only spans one column is still caught:
+            gap_x0 = min(br_a.x0, br_b.x0)          (leftmost left edge)
+            gap_x1 = max(br_a.x1, br_b.x1)          (rightmost right edge)
+
+        A separator text block is inside the gap if it overlaps both axes.
         """
-        gap_x0 = min(br_a.x1, br_b.x1)
-        gap_x1 = max(br_a.x0, br_b.x0)
-        gap_y0 = min(br_a.y1, br_b.y1)
-        gap_y1 = max(br_a.y0, br_b.y0)
+
+        # Horizontal span — union of both cluster widths
+        gap_x0 = min(br_a.x0, br_b.x0)   # leftmost left edge
+        gap_x1 = max(br_a.x1, br_b.x1)   # rightmost right edge
+
+        # Vertical span — the space *between* the two clusters
+        gap_y0 = min(br_a.y1, br_b.y1)   # bottom of the higher cluster
+        gap_y1 = max(br_a.y0, br_b.y0)   # top of the lower cluster
+
+        # If gap_y1 <= gap_y0 the clusters overlap vertically — no gap exists
+        if gap_y1 <= gap_y0:
+            return False
 
         for sep in separator_rects:
-            # Sep must fall within the gap region between the two clusters
             if (sep.x0 < gap_x1 and sep.x1 > gap_x0 and
                     sep.y0 < gap_y1 and sep.y1 > gap_y0):
                 return True
+
         return False
 
     def can_merge(cluster_a, cluster_b):
