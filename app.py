@@ -160,7 +160,7 @@ st.divider()
 
 SAMPLE_QUESTIONS = [
     "What was Qatar's nominal GDP in 2020 in billions of Qatari Riyals",
-    "Who had the largest share of bank domestic credit in October 2024 in absolute terms",
+    "Who had the largest share of bank domestic credit in October 2024",
 ]
 
 st.markdown("**Try a sample question:**")
@@ -212,7 +212,7 @@ if query:
         try:
 
             with st.spinner("Searching..."):
-                query_embedding = st.session_state.vector_store.embed_text(query)
+                query_embedding = st.session_state.vector_store.hyde_embed(query)
                 search_results  = st.session_state.vector_store.search(
                     query_embedding,
                     query_text=query,

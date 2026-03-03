@@ -91,6 +91,89 @@ class VectorStore:
             raise RuntimeError(f"Bedrock call failed: {e}")
 
     # --------------------------------------------------
+    # HyDE — Hypothetical Document Embedding
+    # --------------------------------------------------
+
+    def _generate_hypothetical_passage(self, query):
+        """
+        Asks Nova to write a short passage that would plausibly answer
+        the query, as if it came from a real document.
+
+        The passage will almost certainly be factually wrong (Nova hasn't
+        seen the document), but its vocabulary, phrasing, and structure
+        will closely resemble real passages in the index — which is all
+        that matters for embedding similarity.
+        """
+
+        prompt = (
+            "Write a short factual passage (3-5 sentences) that would "
+            "directly answer the following question, as if extracted from "
+            "a professional financial or economic report. "
+            "Do not say you don't know — make a plausible attempt. "
+            "Do not include any preamble, just the passage itself.\n\n"
+            f"Question: {query}"
+        )
+
+        body = {
+            "messages": [
+                {"role": "user", "content": [{"text": prompt}]}
+            ],
+            "inferenceConfig": {
+                "max_new_tokens": 150,
+                "temperature": 0.5   # some variation so the passage
+                                     # doesn't overfit to one phrasing
+            }
+        }
+
+        try:
+            response = self.bedrock_client.invoke_model(
+                modelId="amazon.nova-pro-v1:0",
+                body=json.dumps(body),
+                accept="application/json",
+                contentType="application/json"
+            )
+            result = json.loads(response["body"].read())
+            passage = result["output"]["message"]["content"][0]["text"].strip()
+            print(f"   HyDE passage: {passage[:120]}…")
+            return passage
+
+        except ClientError as e:
+            # If Nova fails, fall back to the raw query — never crash
+            print(f"  ⚠ HyDE generation failed, falling back to raw query: {e}")
+            return query
+
+    def hyde_embed(self, query):
+        """
+        HyDE query embedding — generates a hypothetical answer passage
+        and embeds that instead of the raw query.
+
+        Use this in place of embed_text() for vague or conversational
+        queries where the raw query text is too sparse to find the right
+        context. For precise keyword queries (e.g. "GDP 2020") the
+        BM25 side of your hybrid search already handles those well,
+        so HyDE adds the most value on the vector side for open-ended
+        questions.
+
+        Usage in app.py — replace:
+            query_embedding = vector_store.embed_text(query)
+        with:
+            query_embedding = vector_store.hyde_embed(query)
+
+        The returned embedding is the same shape as embed_text() and
+        is a drop-in replacement — nothing else in the pipeline changes.
+        """
+
+        print(f"\n── HyDE ────────────────────────────────────────")
+        print(f"   Query: {query}")
+
+        passage = self._generate_hypothetical_passage(query)
+        embedding = self.embed_text(passage)
+
+        print(f"── HyDE complete ───────────────────────────────\n")
+
+        return embedding
+
+    # --------------------------------------------------
     # Load embedded multimodal items
     # --------------------------------------------------
 
