@@ -1,41 +1,26 @@
-streamlit
-python-dotenv
-pymupdf
-pytesseract
-Pillow
-langchain
-langchain-community
-langchain-huggingface
-langchain-core
-faiss-cpu
-sentence-transformers
-transformers
-torch
-huggingface-hub
-pandas
-numpy
-
-# Core dependencies for Multimodal RAG with Amazon Bedrock Nova
+# ── AWS ───────────────────────────────────────────
 boto3>=1.34.0
 botocore>=1.34.0
-langchain>=0.1.0
-langchain-aws>=0.1.0
-langchain-community>=0.2.17
 
-# PDF Processing
+# ── PDF Processing ────────────────────────────────
 PyMuPDF>=1.24.0
 tabula-py>=2.9.0
+pdfplumber>=0.11.0
 
-# Vector Search
+# ── Vector Search ─────────────────────────────────
 faiss-cpu>=1.8.0
 
-# Utilities
+# ── LangChain (text splitting only) ───────────────
+langchain-core>=0.1.0
+langchain-text-splitters>=0.0.1
+
+# ── UI ────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Utilities ─────────────────────────────────────
 numpy>=1.24.0
+pandas>=2.0.0
+Pillow>=10.0.0
 tqdm>=4.66.0
 requests>=2.31.0
 python-dotenv>=1.0.0
-
-# Jupyter Support
-ipython>=8.12.0
-jupyter>=1.1.1
-notebook>=7.3.2

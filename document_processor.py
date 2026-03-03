@@ -37,6 +37,9 @@ class DocumentProcessor:
 
         self.items = []
         self._seen_image_xrefs = set()   # deduplicate shared XObjects
+        self._claimed_rects = {}         # page_num → list of fitz.Rect already
+                                         # captured as table/image — used to
+                                         # suppress duplicate text extraction
 
         self._create_directories()
 
@@ -165,23 +168,70 @@ class DocumentProcessor:
         return candidates[0][1]
 
     # --------------------------------------------------
-    # TEXT — chunk and save
+    # TEXT — chunk and save, skipping claimed regions
     # --------------------------------------------------
 
-    def _process_text(self, text, page_num):
+    def _process_text(self, page, page_num):
+        """
+        Extracts text from the page, but skips any text block whose
+        bounding rect significantly overlaps a region already claimed
+        by a table or image extractor. This prevents axis labels,
+        table cell text, and figure annotations from also appearing
+        as standalone text chunks.
+        """
 
-        chunks = self.text_splitter.split_text(text)
+        claimed = self._claimed_rects.get(page_num, [])
+
+        # Collect only text blocks that are NOT inside a claimed region
+        raw = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        clean_parts = []
+
+        for block in raw.get("blocks", []):
+
+            if block.get("type") != 0:   # skip image blocks
+                continue
+
+            block_rect = fitz.Rect(block["bbox"])
+
+            # Check overlap with every claimed rect on this page
+            overlaps = False
+            for cr in claimed:
+                intersection = block_rect & cr   # fitz intersection
+                if not intersection.is_empty:
+                    # Overlap ratio relative to the text block's own area
+                    overlap_ratio = (intersection.width * intersection.height) / \
+                                    (block_rect.width * block_rect.height + 1e-6)
+                    if overlap_ratio > 0.3:   # >30% overlap → belongs to that region
+                        overlaps = True
+                        break
+
+            if overlaps:
+                continue
+
+            # Collect text from this block
+            block_text = ""
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    block_text += span.get("text", "")
+
+            block_text = block_text.strip()
+            if block_text:
+                clean_parts.append(block_text)
+
+        if not clean_parts:
+            return
+
+        full_text = "\n".join(clean_parts)
+        chunks = self.text_splitter.split_text(full_text)
 
         for i, chunk in enumerate(chunks):
 
             chunk = chunk.strip()
-
             if not chunk:
                 continue
 
             file_name = os.path.join(
-                self.base_dir,
-                "text",
+                self.base_dir, "text",
                 f"{os.path.basename(self.pdf_path)}_text_{page_num}_{i}.txt"
             )
 
@@ -237,10 +287,10 @@ class DocumentProcessor:
     # TABLES — text-layer tables via tabula
     # --------------------------------------------------
 
-    def _process_tables_tabula(self, page_num):
+    def _process_tables_tabula(self, page, page_num):
         """
-        Use tabula for text-layer tables. Skips silently if tabula
-        finds nothing (image-based tables are caught by _process_images).
+        Use tabula for text-layer tables. Also claims the bounding rect
+        of each detected table so _process_text skips that region.
         """
 
         try:
@@ -249,18 +299,44 @@ class DocumentProcessor:
                 self.pdf_path,
                 pages=page_num + 1,
                 multiple_tables=True,
-                silent=True
+                silent=True,
+                guess=True,
+                pandas_options={"header": 0}
             )
 
             if not tables:
                 return
+
+            # Get table bounding boxes from pdfplumber for rect claiming
+            # (tabula doesn't expose bbox, but pdfplumber does)
+            table_bboxes = []
+            try:
+                import pdfplumber
+                with pdfplumber.open(self.pdf_path) as pdf:
+                    pl_page = pdf.pages[page_num]
+                    for t in pl_page.find_tables():
+                        bbox = t.bbox  # (x0, top, x1, bottom)
+                        table_bboxes.append(
+                            fitz.Rect(bbox[0], bbox[1], bbox[2], bbox[3])
+                        )
+            except Exception:
+                pass  # pdfplumber optional — rect claiming just won't apply
+
+            # Register claimed rects for this page
+            if table_bboxes:
+                if page_num not in self._claimed_rects:
+                    self._claimed_rects[page_num] = []
+                self._claimed_rects[page_num].extend(table_bboxes)
 
             for idx, table in enumerate(tables):
 
                 if table.empty:
                     continue
 
-                # Replace NaN with empty string for clean output
+                if not self._is_real_table(table):
+                    print(f"  ↷ Skipping likely false-positive table on page {page_num}")
+                    continue
+
                 table = table.fillna("")
 
                 table_text = self._format_table_as_markdown(
@@ -271,8 +347,7 @@ class DocumentProcessor:
                     continue
 
                 file_name = os.path.join(
-                    self.base_dir,
-                    "tables",
+                    self.base_dir, "tables",
                     f"{os.path.basename(self.pdf_path)}_table_{page_num}_{idx}.txt"
                 )
 
@@ -336,6 +411,11 @@ class DocumentProcessor:
             caption = ""
             if image_rects:
                 caption = self._find_caption(image_rects[0], text_blocks)
+                # Claim the image rect so text extraction and drawn region
+                # detection both skip this area
+                if page_num not in self._claimed_rects:
+                    self._claimed_rects[page_num] = []
+                self._claimed_rects[page_num].append(image_rects[0])
 
             self.items.append({
                 "type": "image",
@@ -392,6 +472,23 @@ class DocumentProcessor:
             if region_area < MIN_IMAGE_AREA:
                 continue
 
+            # Skip if this region significantly overlaps an already-claimed
+            # embedded image XObject — prevents double-extracting a chart
+            # that contains an embedded raster image inside its drawing frame
+            already_claimed = self._claimed_rects.get(page_num, [])
+            duplicate = False
+            for cr in already_claimed:
+                intersection = region_rect & cr
+                if not intersection.is_empty:
+                    overlap = (intersection.width * intersection.height) / \
+                              (region_area + 1e-6)
+                    if overlap > 0.5:
+                        duplicate = True
+                        break
+            if duplicate:
+                print(f"  ↷ Skipping drawn region {region_idx} on page {page_num} — overlaps existing image")
+                continue
+
             # --------------------------------------------------
             # Expand the crop to include nearby text elements
             # (axis labels, tick values, titles, legends, footnotes)
@@ -404,7 +501,7 @@ class DocumentProcessor:
             # --------------------------------------------------
 
             LABEL_ABSORB_PTS = 40   # how far outside the cluster to look
-            MAX_LABEL_WORDS  = 30   # axis labels/titles are short — ignore paragraphs
+            MAX_LABEL_WORDS  = 12   # axis labels/titles are short — ignore paragraphs
 
             expanded = fitz.Rect(region_rect)  # start from cluster boundary
 
@@ -460,6 +557,11 @@ class DocumentProcessor:
 
             encoded = self._encode_image(file_name)
             caption = self._find_caption(region_rect, text_blocks)
+
+            # Claim the expanded crop rect so text extraction skips this area
+            if page_num not in self._claimed_rects:
+                self._claimed_rects[page_num] = []
+            self._claimed_rects[page_num].append(clip)
 
             self.items.append({
                 "type": "image",
@@ -518,19 +620,17 @@ class DocumentProcessor:
             # Get layout-aware text blocks for caption detection
             text_blocks = self._get_text_blocks(page)
 
-            # --- Text ---
-            raw_text = page.get_text()
-            if raw_text.strip():
-                self._process_text(raw_text, page_num)
+            # --- Tables first — claims their rects before text runs ---
+            self._process_tables_tabula(page, page_num)
 
-            # --- Tables (text layer only via tabula) ---
-            self._process_tables_tabula(page_num)
-
-            # --- Embedded images (XObjects) ---
+            # --- Embedded images — claims their rects ---
             self._process_embedded_images(page, page_num, text_blocks)
 
-            # --- Drawn/vector regions (charts, image-tables) ---
+            # --- Drawn/vector regions — skips anything already claimed ---
             self._process_drawn_regions(page, page_num, text_blocks)
+
+            # --- Text last — skips all claimed regions ---
+            self._process_text(page, page_num)
 
             # --- Full page snapshot ---
             self._process_page_image(page, page_num)
