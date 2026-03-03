@@ -160,7 +160,7 @@ st.divider()
 
 SAMPLE_QUESTIONS = [
     "What was Qatar's nominal GDP in 2020 in billions of Qatari Riyals",
-    "Who had the largest share of bank domestic credit in October 2024",
+    "Who had the largest share of bank domestic credit in October 2024 in absolute terms",
 ]
 
 st.markdown("**Try a sample question:**")
