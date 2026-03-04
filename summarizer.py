@@ -10,7 +10,6 @@ import boto3
 import requests
 from botocore.exceptions import ClientError
 
-
 # --------------------------------------------------
 # Backend switch
 # Set to "nova" for production, "ollama" for local dev
@@ -22,16 +21,16 @@ BACKEND = os.getenv("SUMMARIZER_BACKEND", "nova")  # "nova" | "ollama"
 # Nova settings
 # --------------------------------------------------
 
-NOVA_MODEL_ID  = "amazon.nova-pro-v1:0"
-NOVA_REGION    = os.getenv("AWS_REGION", "us-east-1")
+NOVA_MODEL_ID = "amazon.nova-pro-v1:0"
+NOVA_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # --------------------------------------------------
 # Ollama settings
 # --------------------------------------------------
 
-OLLAMA_URL         = "http://localhost:11434/api/generate"
-OLLAMA_IMAGE_MODEL = "llava"     # vision-capable
-OLLAMA_TABLE_MODEL = "mistral"   # text-only, faster
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_IMAGE_MODEL = "llava"  # vision-capable
+OLLAMA_TABLE_MODEL = "mistral"  # text-only, faster
 
 # --------------------------------------------------
 # Cache — persisted to disk so re-runs skip Nova calls
@@ -49,27 +48,28 @@ CACHE_PATH = os.path.join(
 IMAGE_SUMMARY_PROMPT = (
     "You are analyzing an image extracted from a PDF document. "
     "Describe everything you can see in detail. "
-    
+
     "If it is a BAR CHART or COLUMN CHART: "
     "read every bar value as precisely as possible from the axis scale, "
     "and list them explicitly as: 'Category: value%'. "
     "Do not say values are unavailable — estimate from the scale if needed. "
-    
+
     "If it is a LINE CHART: "
     "identify key data points, peaks, troughs, and the start/end values. "
-    
+
     "If it is a TABLE rendered as an image: "
     "transcribe every row and column value into a markdown table. "
-    
+
     "Be specific with numbers — summaries like 'the public sector had the highest bar' "
     "are not useful. Instead write: 'Public sector: ~48%, Services: ~18%, Trade: ~12%'."
 )
 
 TABLE_SUMMARY_PROMPT = (
-    "You are analyzing a data table extracted from a PDF document. "
-    "Write a concise but thorough natural language summary of this table: "
-    "describe what it measures, the column/row structure, key values, and any notable patterns or conclusions. "
-    "Do not just repeat the raw data — explain what it means."
+    "You are analyzing an image of a data table extracted from a PDF document. "
+    "First, transcribe the entire table as a markdown table, preserving all rows, "
+    "columns, headers, and values exactly as shown. "
+    "Then write a concise natural language summary describing what the table measures, "
+    "key values, and any notable patterns or conclusions."
 )
 
 
@@ -106,7 +106,7 @@ class Summarizer:
             raise ValueError(f"Unknown backend '{backend}'. Use 'nova' or 'ollama'.")
 
         # Load cache
-        self._cache      = self._load_cache()
+        self._cache = self._load_cache()
         self._cache_lock = threading.Lock()
 
         print(f"   Cache: {len(self._cache)} existing summaries loaded from {CACHE_PATH}")
@@ -134,12 +134,15 @@ class Summarizer:
     def _cache_key(self, item):
         """
         Stable hash of the item's raw content.
-        Images  → hash of base64 bytes (the actual pixels).
-        Tables  → hash of raw table text.
+        Images and tables → hash of base64 image bytes.
+        Text → hash of raw text.
         Survives re-runs even if page numbers or paths change.
         """
         item_type = item["type"]
-        content   = item.get("image", "") if item_type == "image" else item.get("text", "")
+        if item_type in ("image", "table"):
+            content = item.get("image", "")
+        else:
+            content = item.get("text", "")
         return hashlib.sha256(content.encode()).hexdigest()
 
     # --------------------------------------------------
@@ -263,12 +266,12 @@ class Summarizer:
 
         needs_summary = [
             i for i, item in enumerate(items)
-            if item["type"] in ("image", "table")   # page intentionally excluded
+            if item["type"] in ("image", "table")  # page intentionally excluded
         ]
 
         # Split into cache hits vs items needing a real API call
         cache_hits = []
-        needs_api  = []
+        needs_api = []
 
         for i in needs_summary:
             key = self._cache_key(items[i])
@@ -301,16 +304,16 @@ class Summarizer:
 
         # Parallel API calls for uncached items
         completed = 0
-        lock      = threading.Lock()
+        lock = threading.Lock()
 
         def summarize_one(i, key):
 
             nonlocal completed
 
-            item      = items[i]
+            item = items[i]
             item_type = item["type"]
-            page      = item.get("page")
-            label     = f"{item_type} — page {page + 1}" if page is not None else item_type
+            page = item.get("page")
+            label = f"{item_type} — page {page + 1}" if page is not None else item_type
 
             for attempt in range(1, max_retries + 1):
 
@@ -330,15 +333,19 @@ class Summarizer:
                             page=page
                         )
 
-                    else:  # table
+                    else:  # table — now stored as image
 
-                        table_text = item.get("text", "")
+                        image_b64 = item.get("image", "")
 
-                        if not table_text:
-                            print(f"  ⚠ No table text — {label}, skipping")
+                        if not image_b64:
+                            print(f"  ⚠ No image data for table — {label}, skipping")
                             return
 
-                        summary = self.summarize_table(table_text, page=page)
+                        summary = self.summarize_image(
+                            image_b64=image_b64,
+                            caption=item.get("caption", ""),
+                            page=page
+                        )
 
                     if summary:
                         item["summary"] = summary

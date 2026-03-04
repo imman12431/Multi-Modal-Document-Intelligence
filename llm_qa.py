@@ -1,274 +1,242 @@
-import os
-import json
 import base64
+import os
 import traceback
-import boto3
-from botocore.exceptions import ClientError
+
+import streamlit as st
+
+from vector_store import VectorStore
+from llm_qa import NovaMultimodalQA
+import config
 
 
-class NovaMultimodalQA:
+# -----------------------------------------------------
+# Page config
+# -----------------------------------------------------
 
-    # --------------------------------------------------
-    # Init
-    # --------------------------------------------------
+st.set_page_config(
+    page_title="Document QA",
+    page_icon="📄",
+    layout="wide"
+)
 
-    def __init__(self):
 
-        self.model_id = "amazon.nova-pro-v1:0"
+# -----------------------------------------------------
+# Session state
+# -----------------------------------------------------
 
-        region = os.getenv("AWS_REGION", "us-east-1")
+for key, default in {
+    "vector_store":  None,
+    "qa_system":     None,
+    "loaded":        False,
+    "chat_history":  [],
+    "sample_query":  None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-        print(f"Initializing Nova QA — model: {self.model_id}, region: {region}")
-        print(f"AWS key present: {bool(os.getenv('AWS_ACCESS_KEY_ID'))}")
 
-        self.client = boto3.client(
-            service_name="bedrock-runtime",
-            region_name=region
-        )
+# -----------------------------------------------------
+# Pipeline loader — runs once, silent after success
+# -----------------------------------------------------
 
-        print("✅ Nova QA initialized")
+if not st.session_state.loaded:
 
-    # --------------------------------------------------
-    # Load original image from disk
-    # --------------------------------------------------
-
-    def _load_image(self, item):
-        """
-        Retrieves the original image for an image/page item.
-        Checks for in-memory base64 first (if still in item),
-        then falls back to loading from the path on disk.
-        """
-
-        # If image is still in memory (e.g. during testing)
-        if "image" in item:
-            return item["image"]
-
-        path = item.get("path", "")
-
-        if not path or not os.path.exists(path):
-            return None
-
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-
-    # --------------------------------------------------
-    # Build Nova messages with multimodal context
-    # --------------------------------------------------
-
-    def _build_messages(self, prompt, matched_items):
-        """
-        Builds the Nova message payload.
-
-        - Text and table items → added as text blocks in the system context
-        - Image and page items → loaded from disk and added as inline images
-          so Nova sees the actual visual content, not just the summary
-
-        The summary is also included as a label alongside each image so
-        Nova has a semantic anchor for what it's looking at.
-        """
-
-        system_text = (
-            "You are a helpful assistant answering questions using retrieved context from a PDF document. "
-            "The context below includes text passages, table data, and images. "
-            "Use all provided context to give a thorough, accurate answer. "
-            "If a piece of context is not relevant to the question, ignore it."
-        )
-
-        # User message content — interleaved text and images
-        user_content = []
-
-        text_context_parts = []
-        image_count = 0
-
-        for item in matched_items:
-
-            item_type = item.get("type")
-            page = item.get("page")
-            page_label = f"(page {page + 1})" if page is not None else ""
-
-            if item_type == "text":
-
-                text = item.get("text", "").strip()
-                if text:
-                    text_context_parts.append(f"[Text {page_label}]\n{text}")
-
-            elif item_type == "table":
-
-                # Use summary for readability, append raw data for precision
-                summary = item.get("summary", "")
-                raw = item.get("text", "")
-
-                if summary:
-                    text_context_parts.append(
-                        f"[Table {page_label} — Summary]\n{summary}"
-                    )
-                if raw:
-                    text_context_parts.append(
-                        f"[Table {page_label} — Data]\n{raw}"
-                    )
-
-            elif item_type in ("image", "page"):
-
-                image_b64 = self._load_image(item)
-
-                if not image_b64:
-                    # Fall back to summary only if image can't be loaded
-                    summary = item.get("summary", "")
-                    if summary:
-                        text_context_parts.append(
-                            f"[Image {page_label} — Summary only, image unavailable]\n{summary}"
-                        )
-                    continue
-
-                image_count += 1
-                summary = item.get("summary", "")
-                caption = item.get("caption", "")
-
-                # Add a text label before the image so Nova has context
-                label_parts = [f"[Image {image_count} {page_label}]"]
-                if caption:
-                    label_parts.append(f"Caption: {caption}")
-                if summary:
-                    label_parts.append(f"Summary: {summary}")
-
-                user_content.append({
-                    "text": "\n".join(label_parts)
-                })
-
-                user_content.append({
-                    "image": {
-                        "format": "png",
-                        "source": {
-                            "bytes": image_b64
-                        }
-                    }
-                })
-
-        # Prepend all text context as a single block
-        if text_context_parts:
-            user_content.insert(0, {
-                "text": "--- Retrieved Context ---\n\n" + "\n\n".join(text_context_parts)
-            })
-
-        # Finally append the actual question
-        user_content.append({
-            "text": f"\n--- Question ---\n{prompt}"
-        })
-
-        messages = [
-            {
-                "role": "user",
-                "content": user_content
-            }
-        ]
-
-        print(f"\n=== Nova context: {len(matched_items)} items "
-              f"({image_count} images, "
-              f"{len(text_context_parts)} text/table blocks) ===\n")
-
-        return system_text, messages
-
-    # --------------------------------------------------
-    # Main QA call
-    # --------------------------------------------------
-
-    def generate_answer(self, prompt, matched_items):
-
-        if not matched_items:
-            return "No relevant context retrieved."
-
-        system_text, messages = self._build_messages(prompt, matched_items)
-
-        body = {
-            "system": [{"text": system_text}],
-            "messages": messages,
-            "inferenceConfig": {
-                "max_new_tokens": 1024,
-                "temperature": 0.3
-            }
-        }
+    with st.spinner("Initializing..."):
 
         try:
 
-            print("Calling Nova...")
+            if not os.path.exists(config.EMBEDDED_ITEMS_PATH):
+                st.error("⚠️ Embedded items file not found. Run the pipeline first.")
+                st.stop()
 
-            response = self.client.invoke_model(
-                modelId=self.model_id,
-                body=json.dumps(body),
-                accept="application/json",
-                contentType="application/json"
-            )
-
-            result = json.loads(response["body"].read())
-
-            return result["output"]["message"]["content"][0]["text"].strip()
-
-        except ClientError as e:
-            print(f"\n🚨 Nova ClientError: {e}")
-            traceback.print_exc()
-            return f"Nova error: {str(e)}"
+            vector_store = VectorStore()
+            vector_store.load_items(config.EMBEDDED_ITEMS_PATH)
+            vector_store.build_index()
+            st.session_state.vector_store = vector_store
+            st.session_state.qa_system    = NovaMultimodalQA()
+            st.session_state.loaded       = True
 
         except Exception as e:
-            print(f"\n🚨 Nova unexpected error: {e}")
-            traceback.print_exc()
-            return f"Nova error: {str(e)}"
-
-    # --------------------------------------------------
-    # QA with metadata output
-    # --------------------------------------------------
-
-    def generate_answer_with_context(self, prompt, matched_items):
-
-        answer = self.generate_answer(prompt, matched_items)
-
-        metadata = [
-            {
-                "type": item.get("type"),
-                "page": item.get("page"),
-                "path": item.get("path"),
-                "summary": item.get("summary", "")[:120] + "..."
-                           if item.get("summary") else None
-            }
-            for item in matched_items
-        ]
-
-        return {
-            "answer": answer,
-            "context_items": len(matched_items),
-            "metadata": metadata
-        }
+            st.error(f"Initialization failed: {e}")
+            st.stop()
 
 
-# --------------------------------------------------
-# Standalone test
-# --------------------------------------------------
+# -----------------------------------------------------
+# Context rendering helper
+# -----------------------------------------------------
 
-if __name__ == "__main__":
+def render_context_items(items):
+    """
+    Renders retrieved context items in a collapsible section.
+    Images and tables show their summary; text collapsed if long.
+    """
 
-    print("\n=== Standalone Nova QA test ===")
+    with st.expander(f"📎 Retrieved context ({len(items)} items)", expanded=False):
 
-    test_items = [
-        {
-            "type": "text",
-            "page": 0,
-            "text": "Qatar's GDP grew by 4.2% in 2024, driven by LNG exports.",
-            "path": "sample.txt"
-        },
-        {
-            "type": "table",
-            "page": 1,
-            "text": "Year | GDP Growth\n2022 | 3.1%\n2023 | 3.8%\n2024 | 4.2%",
-            "summary": "Table showing Qatar GDP growth from 2022 to 2024, rising steadily to 4.2%.",
-            "path": "sample_table.txt"
-        }
-    ]
+        for i, item in enumerate(items):
 
-    qa = NovaMultimodalQA()
+            item_type  = item.get("type", "unknown")
+            page       = item.get("page")
+            page_label = f"Page {page + 1}" if page is not None else ""
 
-    result = qa.generate_answer_with_context(
-        "What was Qatar's GDP growth in 2024?",
-        test_items
+            st.markdown(f"**{i + 1}. {item_type.capitalize()}** {page_label}")
+
+            if item_type in ("image", "page"):
+
+                summary = item.get("summary", "No summary available.")
+                st.caption(summary)
+
+            elif item_type == "table":
+
+                summary = item.get("summary", "")
+                path    = item.get("path", "")
+
+                if summary:
+                    st.caption(summary)
+
+                # Show the table image if available on disk
+                if path and os.path.exists(path):
+                    with st.expander("Show table image", expanded=False):
+                        st.image(path)
+
+            elif item_type == "text":
+
+                text = item.get("text", "")
+
+                if len(text) > 300:
+                    with st.expander("Show full text", expanded=False):
+                        st.markdown(text)
+                else:
+                    st.markdown(text)
+
+            st.divider()
+
+
+# -----------------------------------------------------
+# Header — title, about, document link
+# -----------------------------------------------------
+
+st.title("📄 Multimodal Document QA")
+
+st.markdown(
+    """
+## Multimodal RAG Pipeline — Project Summary
+
+This project is an end-to-end RAG system that answers natural language questions about a PDF by understanding its text, tables, and images together. The pipeline runs offline to process and index the document, and a Streamlit app serves as the live query interface.
+
+📂 **Example document used for this Demo:** [View on Google Drive](https://drive.google.com/drive/folders/1Cl24giYMDdK9zoMY-eaCX6_PuRK9i-Nw?usp=sharing)
+
+## Key Features
+
+- **Multimodal extraction** — extracts text, tables, and images from the PDF including charts and image-based tables rendered as vector drawings, which standard extractors miss entirely
+- **Layout-aware clustering** — separates adjacent visual elements on the same page using bounding-box gap checks, text separator vetoes, and size caps so side-by-side charts are never merged into one
+- **Nova-powered summarisation** — every image and table is described by Amazon Nova Pro before embedding, creating a searchable text representation of visual content
+- **Hybrid BM25 + vector search** — combines dense semantic retrieval with IDF-weighted exact keyword matching, boosting results that contain the precise terms used in the question
+- **Two-stage Nova architecture** — Nova is used once during ingestion to summarise visuals for retrieval, and again at query time to reason over the original images and raw table data when generating answers
+    """
+)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.image(
+        "assets/table.png",
+        caption="Example of tabular data in the PDF",
+        width=500
     )
 
-    print("\nAnswer:\n", result["answer"])
-    print("\nMetadata:", result["metadata"])
+with col2:
+    st.image(
+        "assets/figure.png",
+        caption="Example of figure data in the PDF",
+        width=300
+    )
+
+st.divider()
+
+
+# -----------------------------------------------------
+# Sample questions
+# -----------------------------------------------------
+
+SAMPLE_QUESTIONS = [
+    "What was Qatar's nominal GDP in 2020 in billions of Qatari Riyals",
+    "Who had the largest share of bank domestic credit in October 2024 in absolute terms",
+]
+
+st.markdown("**Try a sample question:**")
+
+cols = st.columns(len(SAMPLE_QUESTIONS))
+
+for col, question in zip(cols, SAMPLE_QUESTIONS):
+    with col:
+        if st.button(question, use_container_width=True):
+            st.session_state.sample_query = question
+
+st.divider()
+
+
+# -----------------------------------------------------
+# Resolve query — either from sample button or chat input
+# -----------------------------------------------------
+
+query = st.chat_input("Ask a question about the document...")
+
+if st.session_state.sample_query:
+    query = st.session_state.sample_query
+    st.session_state.sample_query = None
+
+
+# -----------------------------------------------------
+# Chat history display
+# -----------------------------------------------------
+
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("context_items"):
+            render_context_items(msg["context_items"])
+
+
+if query:
+
+    with st.chat_message("user"):
+        st.markdown(query)
+
+    st.session_state.chat_history.append({
+        "role":    "user",
+        "content": query
+    })
+
+    with st.chat_message("assistant"):
+
+        try:
+
+            with st.spinner("Searching..."):
+                query_embedding = st.session_state.vector_store.embed_text(query)
+                search_results  = st.session_state.vector_store.search(
+                    query_embedding,
+                    query_text=query,
+                    k=5
+                )
+
+            with st.spinner("Generating answer..."):
+                result = st.session_state.qa_system.generate_answer_with_context(
+                    query,
+                    search_results
+                )
+
+            answer = result["answer"]
+
+            st.markdown(answer)
+            render_context_items(search_results)
+
+            st.session_state.chat_history.append({
+                "role":          "assistant",
+                "content":       answer,
+                "context_items": search_results
+            })
+
+        except Exception:
+            st.error("Something went wrong. Please try again.")
+            st.code(traceback.format_exc())

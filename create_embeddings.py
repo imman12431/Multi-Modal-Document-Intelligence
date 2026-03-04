@@ -79,9 +79,13 @@ def embed_item(item, idx):
             embed_text = item.get("text", "").strip()
 
         elif item_type == "table":
-            # Prefer Nova summary if available, fall back to raw table text
-            embed_text = item.get("summary") or item.get("text", "")
-            embed_text = embed_text.strip()
+            # Tables are now images — embed the Nova-generated summary
+            # (which contains the transcribed markdown table + analysis)
+            embed_text = item.get("summary", "").strip()
+
+            if not embed_text:
+                print(f"  ⚠ No summary for table at index {idx} — skipping")
+                return None
 
         elif item_type in ("image", "page"):
             # Must have a summary — raw base64 is not embeddable as text
