@@ -79,7 +79,6 @@ class ImageExtractor:
                                           self.claimed_rects.get(page_num, [])):
                     continue
 
-                caption = self._find_caption(img_rect, text_blocks)
                 if page_num not in self.claimed_rects:
                     self.claimed_rects[page_num] = []
                 self.claimed_rects[page_num].append(img_rect)
@@ -87,8 +86,7 @@ class ImageExtractor:
             items.append({
                 "type": "image",
                 "page": page_num,
-                "caption": caption,
-                "image": encoded,
+"image": encoded,
                 "path": file_name
             })
 
@@ -157,7 +155,6 @@ class ImageExtractor:
                 continue
 
             encoded = self._encode_image(file_name)
-            caption = self._find_caption(region_rect, text_blocks)
 
             if page_num not in self.claimed_rects:
                 self.claimed_rects[page_num] = []
@@ -166,8 +163,7 @@ class ImageExtractor:
             items.append({
                 "type": "image",
                 "page": page_num,
-                "caption": caption,
-                "image": encoded,
+"image": encoded,
                 "path": file_name
             })
 
@@ -217,30 +213,6 @@ class ImageExtractor:
     def _encode_image(self, file_name):
         with open(file_name, "rb") as f:
             return base64.b64encode(f.read()).decode("utf8")
-
-    def _find_caption(self, image_rect, text_blocks):
-        """Find the closest text block directly above or below the image."""
-        candidates = []
-
-        for block in text_blocks:
-            r = block["rect"]
-
-            h_overlap = r.x0 < image_rect.x1 and r.x1 > image_rect.x0
-            if not h_overlap:
-                continue
-
-            dist_above = image_rect.y0 - r.y1
-            dist_below = r.y0 - image_rect.y1
-
-            if 0 <= dist_above <= CAPTION_PROXIMITY_PTS:
-                candidates.append((dist_above, block["text"]))
-            elif 0 <= dist_below <= CAPTION_PROXIMITY_PTS:
-                candidates.append((dist_below, block["text"]))
-
-        if not candidates:
-            return ""
-        candidates.sort(key=lambda x: x[0])
-        return candidates[0][1]
 
     def _overlaps_claimed(self, region_rect, region_area, claimed):
         """

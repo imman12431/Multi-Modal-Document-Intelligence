@@ -65,11 +65,10 @@ IMAGE_SUMMARY_PROMPT = (
 )
 
 TABLE_SUMMARY_PROMPT = (
-    "You are analyzing an image of a data table extracted from a PDF document. "
-    "First, transcribe the entire table as a markdown table, preserving all rows, "
-    "columns, headers, and values exactly as shown. "
-    "Then write a concise natural language summary describing what the table measures, "
-    "key values, and any notable patterns or conclusions."
+    "You are analyzing a data table extracted from a PDF document. "
+    "Write a concise but thorough natural language summary of this table: "
+    "describe what it measures, the column/row structure, key values, and any notable patterns or conclusions. "
+    "Do not just repeat the raw data — explain what it means."
 )
 
 
@@ -134,13 +133,12 @@ class Summarizer:
     def _cache_key(self, item):
         """
         Stable hash of the item's raw content.
-        Images and tables → hash of base64 image bytes.
-        Text → hash of raw text.
-        Survives re-runs even if page numbers or paths change.
+        Images + tables → hash of base64 image bytes.
+        Falls back to path if image not in memory.
         """
         item_type = item["type"]
         if item_type in ("image", "table"):
-            content = item.get("image", "")
+            content = item.get("image") or item.get("path", "")
         else:
             content = item.get("text", "")
         return hashlib.sha256(content.encode()).hexdigest()
@@ -149,12 +147,27 @@ class Summarizer:
     # Public: summarize a single image item
     # --------------------------------------------------
 
-    def summarize_image(self, image_b64, caption="", page=None):
+    def _load_image_b64(self, item):
+        """
+        Gets base64 image data for an item.
+        Checks in-memory first, then loads from disk path as fallback.
+        This ensures items whose image was stripped after a failed
+        summarization can still be retried on the next run.
+        """
+        b64 = item.get("image", "")
+        if b64:
+            return b64
+
+        path = item.get("path", "")
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+
+        return ""
+
+    def summarize_image(self, image_b64, page=None):
 
         prompt = IMAGE_SUMMARY_PROMPT
-
-        if caption:
-            prompt += f"\n\nCaption hint (if available): {caption}"
 
         if page is not None:
             prompt += f"\nThis image is from page {page + 1} of the document."
@@ -319,9 +332,9 @@ class Summarizer:
 
                 try:
 
-                    if item_type == "image":
+                    if item_type in ("image", "table"):
 
-                        image_b64 = item.get("image", "")
+                        image_b64 = self._load_image_b64(item)
 
                         if not image_b64:
                             print(f"  ⚠ No image data — {label}, skipping")
@@ -329,21 +342,6 @@ class Summarizer:
 
                         summary = self.summarize_image(
                             image_b64=image_b64,
-                            caption=item.get("caption", ""),
-                            page=page
-                        )
-
-                    else:  # table — now stored as image
-
-                        image_b64 = item.get("image", "")
-
-                        if not image_b64:
-                            print(f"  ⚠ No image data for table — {label}, skipping")
-                            return
-
-                        summary = self.summarize_image(
-                            image_b64=image_b64,
-                            caption=item.get("caption", ""),
                             page=page
                         )
 
